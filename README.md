@@ -1,20 +1,32 @@
 # Berserk — мост к Muse
 
+[![Tests](https://github.com/ForgetMeAI/berserk-muse/actions/workflows/test.yml/badge.svg)](https://github.com/ForgetMeAI/berserk-muse/actions/workflows/test.yml)
+
 Berserk — экспериментальный локальный мост кодинг-клиентов к приложению Muse, а не официальный API Meta. Есть OpenAI Chat Completions и Anthropic Messages для Claude Code; статус реальных проверок указан ниже. Основной режим использует сохранённые сессии аккаунтов и прямой HTTPS/WebSocket-транспорт. Каждый WebSocket работает в отдельном локальном процессе Node; закрытие подтверждается только после выхода этого процесса. Браузер нужен при входе в аккаунт; во время генерации окно Muse не требуется.
 
 ## Запуск
 
-Требуется Node.js 22 или новее. В папке проекта:
+Требуются Node.js 22 или новее и установленный Chrome/Chromium для первого входа. Для Windows выполняйте команды внутри WSL2; подробности — в разделе платформ ниже.
 
 ```sh
+git clone https://github.com/ForgetMeAI/berserk-muse.git
+cd berserk-muse
 npm ci --ignore-scripts
 npm run launch                 # HTTPS + native WebSocket по умолчанию
-npm run agent -- "Опиши задачу"
-# Для возврата к старому транспорту: npm run stop, затем
-# MUSE_TRANSPORT=browser npm run launch -- --login
-npm run status
 npm run panel                  # открыть локальную панель без входа
 ```
+
+В панели нажмите **«Добавить аккаунты»**, вставьте строки `почта | ссылка на почту` и дождитесь статуса **«Активен»**. Если автоматический вход недоступен, завершите его в открывшемся окне Muse. Поддерживаемые почтовые сервисы и массовый импорт описаны ниже.
+
+После подключения аккаунта запустите нужный установленный клиент:
+
+```sh
+npm run client -- claude --work-dir ./workspace
+# или
+npm run client -- hermes --work-dir ./workspace
+```
+
+Клиенты устанавливаются отдельно. Старый OpenCode-лаунчер `npm run agent -- "Опиши задачу"` предназначен для macOS. Проверить сервис можно командой `npm run status`, остановить — `npm run stop`.
 
 HTTP-режим нужно считать экспериментом до прохождения перечисленных ниже end-to-end gates. Сервис слушает loopback; порт задаёт `MUSE_PORT` (по умолчанию `8787`). В HTTP-режиме допускается до `MUSE_MAX_ACTIVE` активных логических запросов (по умолчанию 1) и `MUSE_QUEUE_LIMIT` ожидающих запросов (по умолчанию 4; максимум 100). Соединение до отправки генерации может быть восстановлено один раз через существующий лимит refresh. Повторная отправка разрешена только если транспорт доказал, что запрос ещё не был принят; принятый или неоднозначный запрос автоматически не воспроизводится. Возврат к прежнему транспорту задаётся явно через MUSE_TRANSPORT=browser после остановки сервиса.
 
@@ -62,7 +74,7 @@ npm run panel
 
 Linux-лаунчер панели использует `xdg-open`; если открыть браузер не получилось, напечатанный `http://127.0.0.1:8787/panel` можно открыть вручную. [Windows обычно получает доступ к Linux localhost-сервису](https://learn.microsoft.com/en-us/windows/wsl/networking). Локальный Host/Origin и привязка к loopback сохраняются; порт наружу не публикуется. Старый `npm run agent` с `sandbox-exec` относится к macOS; для новых клиентов используйте `npm run client`.
 
-На Debian Linux x64 с Node 22.23.3 прошли **416/416** тестов и запуск → status → health → панель с пустым списком аккаунтов → остановка. Этот прогон использовал отдельную временную папку; вход в Muse, генерация и графический браузер на Linux не проверялись. Фактический прогон внутри WSL2 ещё не выполнен. CI содержит Ubuntu/macOS × Node 22/26; сам workflow не публиковался и не запускался.
+На Debian Linux x64 с Node 22.23.3 прошли **416/416** тестов и запуск → status → health → панель с пустым списком аккаунтов → остановка. Этот исторический прогон использовал отдельную временную папку; вход в Muse, генерация и графический браузер на Linux не проверялись. Фактический прогон внутри WSL2 ещё не выполнен. Текущий CI проверяет Ubuntu/macOS × Node 22/26; результаты каждого коммита доступны в [GitHub Actions](https://github.com/ForgetMeAI/berserk-muse/actions).
 
 ## Аккаунты и панель
 
@@ -71,12 +83,12 @@ CLI и панель работают с локальным сервисом. И�
 Для автоматического получения кода добавлены следующие формы ссылок:
 
 ```text
-person@example.test | https://mail.example.test/inbox/person%40example.test
-person@example.test | https://mail.example.test/?email=person%40example.test
-person@example.test | https://mail.example.test/?address=person%40example.test
+person@example.test | https://generator.email/person@example.test
+person@example.test | https://luuvan.site/person@example.test
+person@example.test | https://luuvan.site/?inbox=person%40example.test
 ```
 
-Это альтернативные формы одной записи, а не три разных аккаунта. У Luuvan также принимаются параметры `email` и `address`; закодированный `%40` поддерживается. Если адреса в пути, параметрах и строке расходятся, импорт отклоняется.
+Адрес `person@example.test` вымышленный — замените его своей почтой. Это альтернативные формы одной записи, а не три разных аккаунта. У Luuvan также принимаются параметры `email` и `address`; закодированный `%40` поддерживается. Если адреса в пути, параметрах и строке расходятся, импорт отклоняется.
 
 ```sh
 npm run account add < accounts.txt

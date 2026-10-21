@@ -330,7 +330,7 @@ test('returns a validated session bundle from only Muse session response and off
   const progress = [];
   try {
     const bootstrapper = new BrowserSessionBootstrapper({
-      chromium: fake.chromium, rootDir,
+      chromium: fake.chromium, browserExecutable: null, rootDir,
       pollMs: 1,
       mailClient: { async fetchLatest() { mailCalls++; return []; } },
     });
@@ -362,6 +362,27 @@ test('returns a validated session bundle from only Muse session response and off
     assert.deepEqual(progress, [5, 15, 25, 65, 95, 100]);
     assert.equal(mailCalls, 0, 'mail polling begins only after Muse confirms an OTP was sent');
     await assert.rejects(lstat(launchCalls[0].profileDir), { code: 'ENOENT' });
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('uses an explicitly resolved browser executable instead of the Chrome channel fallback', async () => {
+  const rootDir = await makeRoot();
+  const launchCalls = [];
+  const fake = fakeChromium({ launchCalls });
+  try {
+    const bootstrapper = new BrowserSessionBootstrapper({
+      chromium: fake.chromium,
+      browserExecutable: '/test/bin/chromium',
+      rootDir,
+      pollMs: 1,
+    });
+    await bootstrapper.login(ACCOUNT);
+    assert.equal(launchCalls.length, 1);
+    assert.equal(launchCalls[0].options.executablePath, '/test/bin/chromium');
+    assert.equal(Object.hasOwn(launchCalls[0].options, 'channel'), false);
+    assert.equal(fake.context.closeCalls, 1);
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }

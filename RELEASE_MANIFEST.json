@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
-  "preparedAt": "2026-10-21T13:37:54.535Z",
+  "preparedAt": "2026-10-21T13:49:51.162Z",
   "status": "qualified_source_snapshot",
   "excluded": [
     ".state",
@@ -11,10 +11,9 @@
     "private local reports"
   ],
   "tests": {
-    "macosNode22": 512,
-    "macosNode26": 512,
-    "cleanInstall": true,
-    "emptyStateLifecycle": true
+    "historicalLocalQualification": "docs/verification-2026-10-21.json",
+    "currentCommitCI": "https://github.com/ForgetMeAI/berserk-muse/actions/workflows/test.yml",
+    "note": "Historical qualification has its own source hashes; current CI results apply to their exact commit."
   },
   "files": {
     ".github/workflows/test.yml": {
@@ -50,8 +49,8 @@
       "sha256": "01969ea9bac44ef7e8500c6be1bf62c892503db0a024a024b092968d286dbdc2"
     },
     "README.md": {
-      "bytes": 29843,
-      "sha256": "587ad74212d1e821bdd3630087f6592783ee49be4e13a65840579153573727b6"
+      "bytes": 31265,
+      "sha256": "517df214dfbc44bdc16328b19ac8f44a42656f6026b79211b24cbc410edd3865"
     },
     "SECURITY.md": {
       "bytes": 1091,
@@ -62,16 +61,16 @@
       "sha256": "ed47012a5c9209c28691676fb7ef64ac3753ca0ca31df5e72298b423e47488f7"
     },
     "docs/ARCHITECTURE.md": {
-      "bytes": 40041,
-      "sha256": "1cd6fb7452e6497363ad60a4800bc5f672b9c710e8793c81d4d59ae4cd484d3d"
+      "bytes": 40119,
+      "sha256": "43678fde536d0a462755fdc07ff731c6f1d61b1f2cb39d5a805236d246968fa8"
     },
     "docs/CORE_CONTRACTS.md": {
       "bytes": 12558,
       "sha256": "2ed682e172ed4c589ccb109ae1da7b722db2d78da92f995a842d1253d8f4fa8f"
     },
     "docs/QUALIFICATION.md": {
-      "bytes": 4030,
-      "sha256": "dd615a8e3568df6273841e1b1ebb6c65876a39c8b73282b0695c42be9f1ac24a"
+      "bytes": 4826,
+      "sha256": "8df7bcd59f36c014e50deb4e1a092f4bc448be8b7c871ecc51fc054082cfd057"
     },
     "docs/muse-vendor.lock.json": {
       "bytes": 57046,
@@ -346,8 +345,8 @@
       "sha256": "38f809b013ab4be431bb999ea98d137b7be06aaec4490d406b2cc51838106cce"
     },
     "tests/account-login.test.mjs": {
-      "bytes": 95255,
-      "sha256": "f472fa010edc2afae0dea48e766aa63e1ab72dc5a618e07ce2fb2f662d25c86b"
+      "bytes": 96040,
+      "sha256": "0be793153b06fb786e56db28d197ec30f0ea7fb7fd7e337d9a94f324c8bc7110"
     },
     "tests/account-pool.test.mjs": {
       "bytes": 26543,
