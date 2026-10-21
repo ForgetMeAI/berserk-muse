@@ -1,0 +1,12 @@
+node_modules/
+.state/
+.verification/
+.env
+.env.*
+*.log
+*.har
+.DS_Store
+.test-tmp/
+.berserk-client-profiles/
+workspace/
+docs/VERIFICATION.json

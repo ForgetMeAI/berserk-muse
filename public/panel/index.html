@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Berserk · Muse</title>
+    <link rel="stylesheet" href="/panel/style.css">
+    <script type="module" src="/panel/app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">B</span><div><p class="eyebrow">BERSERK / MUSE</p><h1>Управление аккаунтами</h1></div></div>
+        <div class="top-actions"><span class="local-access">Локальный доступ</span><span id="connection" class="connection"><i></i><span>Подключение</span></span></div>
+      </header>
+      <section id="unavailable-state" class="unavailable-state" hidden>
+        <p class="eyebrow">НЕТ СОЕДИНЕНИЯ</p><h2>Не удалось подключиться к Berserk</h2><p>Убедитесь, что локальный сервис запущен, и попробуйте ещё раз.</p>
+        <button id="retry" class="button button-primary" type="button">Повторить подключение</button>
+      </section>
+      <div id="dashboard" hidden>
+        <section class="page-heading"><div><p class="eyebrow">ОБЗОР</p><h2>Всё под контролем</h2><p class="muted">Аккаунты, расход и запросы в одном месте.</p><p class="shop-note"><a href="https://t.me/forgetshop_bot" target="_blank" rel="noopener noreferrer">Аккаунты для Berserk — @forgetshop_bot</a></p></div><div class="heading-actions"><span id="service-status" class="status-pill">—</span><button id="refresh" class="button button-quiet" type="button">Обновить</button><button id="open-import" class="button button-primary" type="button" aria-expanded="false" aria-controls="import-card">+ Добавить аккаунты</button></div></section>
+        <p id="service-error" class="inline-error" role="alert" hidden></p>
+        <section class="metrics" aria-label="Общая статистика">
+          <article class="metric"><span>Всего аккаунтов</span><strong id="account-count">—</strong><small id="account-note">Загружено в Berserk</small></article>
+          <article class="metric"><span>Активные</span><strong id="active-count" class="positive">—</strong><small id="active-note">Готовы к работе</small></article>
+          <article class="metric"><span>Нуждаются во внимании</span><strong id="attention-count">—</strong><small>Вход, ошибка или блокировка</small></article>
+          <article class="metric"><span>Запросов в очереди</span><strong id="queue-count">—</strong><small id="queue-note">—</small></article>
+        </section>
+        <section class="usage-grid" aria-label="Токены и запросы">
+          <article class="usage-card"><div class="card-label"><h3>Дополнительные токены</h3><span id="quota-badge" class="data-badge">MUSE</span></div><strong id="remaining-value" class="usage-number">Нет данных</strong><p id="remaining-note" class="muted">Остаток дополнительных токенов по данным Muse.</p><div id="total-quota-track" class="meter unknown" role="img" aria-label="Лимит неизвестен"><span id="total-quota-fill"></span></div><div class="meter-caption"><span id="quota-caption">Процент расхода недоступен</span><span id="quota-coverage">0 / 0 аккаунтов</span></div><p id="quota-observed" class="micro-note" hidden></p><p class="micro-note">Недельный лимит показан отдельно у аккаунтов. Автообновление примерно раз в 5 минут.</p><button id="refresh-balances" class="button button-quiet button-small" type="button">Обновить балансы</button></article>
+          <article class="usage-card"><div class="card-label"><h3>Расход в Berserk</h3><span class="data-badge">ОЦЕНКА</span></div><strong id="usage-value" class="usage-number">—</strong><p class="muted">По сохранённым запросам, приблизительно.</p><div class="token-split"><span>Вход <b id="input-value">—</b></span><span>Выход <b id="output-value">—</b></span></div><p id="usage-note" class="micro-note">—</p></article>
+          <article class="usage-card request-metric"><div class="card-label"><h3>Запросы</h3><span class="data-badge">ИСТОРИЯ</span></div><strong id="request-count" class="usage-number">—</strong><p class="muted">Уникальные запросы к локальному API.</p><div class="token-split"><span>Успешно <b id="success-count">—</b></span><span>С ошибкой <b id="failed-count">—</b></span></div><p id="history-note" class="micro-note">За сохранённую историю</p></article>
+        </section>
+        <section id="import-card" class="section-card import-card" aria-labelledby="import-title" hidden>
+          <div class="section-heading"><div><p class="eyebrow">МАССОВОЕ ДОБАВЛЕНИЕ</p><h2 id="import-title">Добавить аккаунты</h2></div><button id="close-import" class="button button-quiet" type="button">Свернуть</button></div>
+          <form id="import-form" autocomplete="off">
+            <label class="field-label" for="import-text">Один аккаунт на строку: почта | ссылка на доступ к почте</label>
+            <textarea id="import-text" rows="5" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="import-help import-count" placeholder="name@example.com | https://generator.email/name@example.com&#10;another@example.com | https://luuvan.site/another@example.com"></textarea>
+            <div class="import-tools"><label class="file-picker button button-quiet" for="import-file">Загрузить .txt<input id="import-file" type="file" accept=".txt,text/plain"></label><span id="import-count" class="muted">0 / 100 строк · 0 / 64 КБ</span><button id="clear-import" class="button button-text" type="button">Очистить</button></div>
+            <p id="import-help" class="micro-note">До 100 строк за раз. Можно добавить номер: 143 | почта | ссылка. Для Generator.email и Luuvan пробуем получить код автоматически; при сбое — ручной вход. У Luuvan принимаются ссылки /почта и ?inbox=почта. Gmail и Outlook требуют ручного входа. Ссылки на почту хранятся только локально.</p>
+            <p id="import-error" class="inline-error" role="alert" hidden></p>
+            <div id="import-preview" class="import-preview" hidden><div class="preview-heading"><h3 id="preview-heading" tabindex="-1">Проверка списка</h3><span id="preview-summary" class="muted" role="status" aria-live="polite" aria-atomic="true"></span></div><div class="table-wrap preview-scroll"><table><thead><tr><th>Строка</th><th>Аккаунт</th><th>Почта</th><th>Результат проверки</th></tr></thead><tbody id="preview-list"></tbody></table></div></div>
+            <div class="import-footer"><p id="import-action-note" class="muted">Сначала проверим формат всех строк.</p><div class="actions"><button id="preview-import" class="button button-quiet" type="submit">Проверить список</button><button id="submit-import" class="button button-primary" type="button" hidden>Добавить аккаунты</button></div></div>
+          </form>
+        </section>
+        <div id="import-result" class="result-banner" role="status" aria-live="polite" hidden></div>
+        <section class="section-card">
+          <div class="section-heading"><div><p class="eyebrow">АККАУНТЫ</p><h2>Подключённые аккаунты <span id="accounts-total" class="subtle-count">0</span></h2></div><div class="filters"><input id="account-search" type="search" placeholder="Найти аккаунт" aria-label="Поиск аккаунта" autocomplete="off"><select id="account-filter" aria-label="Фильтр аккаунтов"><option value="all">Все статусы</option><option value="active">Активные</option><option value="attention">Нужно внимание</option><option value="busy">Занятые</option></select></div></div>
+          <div class="table-wrap"><table class="account-table"><thead><tr><th>Аккаунт</th><th>Состояние</th><th>Баланс и недельный лимит</th><th>Расход · оценка</th><th class="actions-heading">Действия</th></tr></thead><tbody id="accounts-list"></tbody></table></div>
+          <div id="accounts-empty" class="empty-state" hidden><p>Пока нет аккаунтов</p><span>Нажмите «Добавить аккаунты» и вставьте список.</span></div><p id="accounts-no-match" class="empty-state" hidden>По этому фильтру ничего не найдено.</p>
+        </section>
+        <section id="jobs-card" class="section-card" hidden><div class="section-heading"><div><p class="eyebrow">ПРОЦЕСС</p><h2>Вход и проверки</h2></div><span id="jobs-total" class="subtle-count"></span></div><div id="jobs-list" class="jobs-list"></div><button id="jobs-more" class="button button-text" type="button" hidden>Показать все задачи</button></section>
+        <section class="section-card"><div class="section-heading"><div><p class="eyebrow">АКТИВНОСТЬ</p><h2>Последние запросы</h2></div><span id="requests-total" class="subtle-count">0</span></div><div class="request-list" id="requests-list"></div><p id="requests-empty" class="empty-state" hidden>Запросов пока нет. Они появятся здесь после обращения к API.</p><div class="load-more-wrap"><button id="requests-more" class="button button-quiet" type="button" hidden>Загрузить предыдущие</button></div></section>
+      </div>
+      <footer><span>Локально на этом устройстве</span><span id="updated-at">Ожидание обновлений</span><span class="panel-watermark">@forgetmeai</span></footer>
+    </main>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

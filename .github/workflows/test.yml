@@ -1,0 +1,26 @@
+name: tests
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+jobs:
+  node-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [22, 26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run launch
+      - run: npm run status
+      - run: npm run stop

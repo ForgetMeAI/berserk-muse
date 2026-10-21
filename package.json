@@ -1,0 +1,33 @@
+{
+  "name": "berserk-muse",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Experimental local OpenAI-compatible bridge to your own Muse browser account",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "login": "node scripts/control.mjs login",
+    "status": "node scripts/control.mjs status",
+    "agent": "node scripts/agent.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:agent": "node scripts/verify-agent.mjs",
+    "test:live": "node scripts/verify-live.mjs",
+    "launch": "node scripts/start.mjs",
+    "stop": "node scripts/control.mjs stop",
+    "test:coding": "node scripts/verify-coding.mjs",
+    "account": "node scripts/account.mjs",
+    "panel": "node scripts/panel.mjs",
+    "client": "node scripts/client.mjs",
+    "test:clients": "node scripts/verify-clients.mjs"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "playwright-core": "^1.64.1",
+    "tough-cookie": "^6.0.2",
+    "undici": "^7.30.1"
+  }
+}

@@ -1,0 +1,44 @@
+# Place at $HERMES_HOME/config.yaml for an isolated Hermes profile.
+# Start Hermes with HERMES_HOME set by the launcher; do not copy this into
+# ~/.hermes/config.yaml unless changing the user's global provider is intended.
+# The isolated launcher sets HERMES_STREAM_RETRIES=0 for this child process.
+model:
+  provider: custom
+  default: muse-web
+  base_url: http://127.0.0.1:8787/v1
+  api_key: muse-local
+  api_mode: chat_completions
+  context_length: 65536
+agent:
+  # Keep one outer request attempt; the chat-completions SDK is configured
+  # separately with zero internal retries.
+  api_max_retries: 1
+providers: {}
+fallback_providers: []
+toolsets:
+  - hermes-cli
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+  provider: ""
+auxiliary:
+  vision: &muse_aux
+    provider: custom
+    model: muse-web
+    base_url: http://127.0.0.1:8787/v1
+    api_key: muse-local
+    api_mode: chat_completions
+    fallback_chain: []
+  web_extract: *muse_aux
+  compression: *muse_aux
+  skills_hub: *muse_aux
+  approval: *muse_aux
+  mcp: *muse_aux
+  title_generation: *muse_aux
+  tts_audio_tags: *muse_aux
+  triage_specifier: *muse_aux
+  kanban_decomposer: *muse_aux
+  profile_describer: *muse_aux
+  curator: *muse_aux
+terminal:
+  cwd: /path/to/your/project
