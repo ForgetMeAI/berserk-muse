@@ -1,6 +1,6 @@
 {
   "version": "0.1.0",
-  "preparedAt": "2026-10-21T13:49:51.162Z",
+  "preparedAt": "2026-10-21T14:07:14.376Z",
   "status": "qualified_source_snapshot",
   "excluded": [
     ".state",
@@ -49,8 +49,8 @@
       "sha256": "01969ea9bac44ef7e8500c6be1bf62c892503db0a024a024b092968d286dbdc2"
     },
     "README.md": {
-      "bytes": 31265,
-      "sha256": "517df214dfbc44bdc16328b19ac8f44a42656f6026b79211b24cbc410edd3865"
+      "bytes": 3684,
+      "sha256": "8dd2b8b59f17955d331c312c83dd76c6f83d84e796a5434c1a3c0f2c2e9e581a"
     },
     "SECURITY.md": {
       "bytes": 1091,
@@ -531,6 +531,14 @@
     "tests/websocket-process.test.mjs": {
       "bytes": 7571,
       "sha256": "9be543043fb13b18efc92dd024d26603043cb87342ff8269e970910c4964fc0b"
+    },
+    "docs/USER_GUIDE.md": {
+      "bytes": 31398,
+      "sha256": "3519a1292461d85be189087059b0d110302b99ce66581a20791351c73cdf50fb"
+    },
+    "docs/assets/panel.jpg": {
+      "bytes": 55649,
+      "sha256": "cbf88656f10667c5e81850f537c8e5592a72e433268879bf2fcc480cdcdb9b3c"
     }
   },
   "license": "MIT"
