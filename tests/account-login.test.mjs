@@ -33,7 +33,7 @@ function sessionResponse({ url = 'https://muse.ai/api/session', headers = {}, st
 
 function otpResponse(email, {
   status = 200, body = { success: true, status: 'ok' }, onJson = null,
-  omitContentLength = false, bodyBytes = null, onBody = null,
+  omitContentLength = false, bodyBytes = null, onBody = null, onBodySettled = null,
 } = {}) {
   const request = {
     url: () => 'https://muse.ai/api/auth/native/send-otp',
@@ -47,7 +47,12 @@ function otpResponse(email, {
     headers: () => omitContentLength ? {} : ({ 'content-length': String(Buffer.byteLength(JSON.stringify(body))) }),
     async body() {
       const result = onBody?.();
-      if (result && typeof result.then === 'function') return result;
+      if (result && typeof result.then === 'function') {
+        const value = await result;
+        onBodySettled?.();
+        return value;
+      }
+      onBodySettled?.();
       return bodyBytes ?? Buffer.from(JSON.stringify(body));
     },
     async json() {
@@ -2083,33 +2088,47 @@ test('abort interrupts a pending chunked OTP response body read without publishi
   }
 });
 
-test('a stalled chunked OTP response body is cut off at the login deadline', async () => {
+test('a stalled chunked OTP response body is cut off at the injected login deadline', async () => {
   const rootDir = await makeRoot();
   const fake = fakeChromium({ page: new FakePage({ otpFlow: true, sessionOnContinue: false }) });
   let releaseBody;
   let markBodyStarted;
+  let markBodySettled;
+  let bodyReadStartedAt = null;
   const bodyStarted = new Promise(resolve => { markBodyStarted = resolve; });
-  fake.page.otpResponseSequence = [{ omitContentLength: true, onBody: () => new Promise(resolve => {
-    releaseBody = resolve;
-    markBodyStarted();
-  }) }];
+  const bodySettled = new Promise(resolve => { markBodySettled = resolve; });
+  fake.page.otpResponseSequence = [{ omitContentLength: true,
+    onBody: () => new Promise(resolve => {
+      bodyReadStartedAt = now;
+      releaseBody = resolve;
+      markBodyStarted();
+    }),
+    onBodySettled: () => markBodySettled(),
+  }];
   const diagnostics = [];
+  const startAt = 10_000;
+  const timeoutMs = 120;
+  let now = startAt;
   try {
     const bootstrapper = new BrowserSessionBootstrapper({ chromium: fake.chromium, rootDir,
-      timeoutMs: 120, manualTimeoutMs: 50, pollMs: 2,
-      sleep: ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 2))),
+      timeoutMs, manualTimeoutMs: 50, pollMs: 2,
+      clock: () => now,
+      sleep: async ms => { await bodyStarted; now += ms; },
       mailClient: { detect: () => 'luuvan', async fetchLatest() { return []; } },
       onDiagnostic: event => diagnostics.push(event) });
-    const startedAt = Date.now();
     await assert.rejects(bootstrapper.login(ACCOUNT), error => error.code === 'needs_user_interaction');
-    const elapsed = Date.now() - startedAt;
-    await Promise.race([bodyStarted, new Promise(resolve => setTimeout(resolve, 500))]);
     assert.equal(typeof releaseBody, 'function', 'chunked body read should have started');
-    assert.ok(elapsed < 1_000, `login should finish promptly at its deadline (elapsed ${elapsed}ms)`);
+    assert.ok(bodyReadStartedAt !== null && bodyReadStartedAt < startAt + timeoutMs,
+      'chunked body read must start before the injected login deadline');
+    assert.ok(now >= startAt + timeoutMs, 'login must reach its injected deadline');
     assert.equal(fake.context.closeCalls, 1);
-    releaseBody(Buffer.from('{"success":true}'));
+    const otpDiagnosticsAtClose = diagnostics.filter(event => event.stage === 'otp_response');
+    releaseBody(Buffer.from('{"success":true,"error":"private-late-body-sentinel"}'));
+    await bodySettled;
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(JSON.stringify(diagnostics).includes('success'), false);
+    assert.deepEqual(diagnostics.filter(event => event.stage === 'otp_response'), otpDiagnosticsAtClose,
+      'late body completion must not publish OTP metadata after owned-context cleanup');
+    assert.equal(JSON.stringify(diagnostics).includes('private-late-body-sentinel'), false);
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }

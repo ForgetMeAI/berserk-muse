@@ -501,7 +501,7 @@ test('TransportFailure validates its fields, is frozen, and is brand-checked', (
 });
 
 test('a transient ensureValid failure applies a bounded cooldown whose timer wakes waiters', async t => {
-  const clock = { now: () => Date.now() };
+  const clock = makeClock();
   const store = await newStore(t, clock);
   await addAccounts(store, 1);
   let failures = 1;
@@ -515,9 +515,17 @@ test('a transient ensureValid failure applies a bounded cooldown whose timer wak
   assert.equal(availability.busy, 0);
   assert.equal(availability.transientCooldown, 1);
   assert.equal(availability.serviceBlocked, false);
-  const started = Date.now();
-  await pool.waitForAvailability(undefined, { sinceVersion: pool.version });
-  assert.ok(Date.now() - started >= 30, 'woken by the bounded cooldown timer');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let woke = false;
+  const waiting = pool.waitForAvailability(undefined, { sinceVersion: pool.version }).then(() => { woke = true; });
+  clock.advance(39);
+  t.mock.timers.tick(39);
+  await Promise.resolve();
+  assert.equal(woke, false, 'the waiter stays asleep until the cooldown deadline');
+  clock.advance(1);
+  t.mock.timers.tick(1);
+  await waiting;
+  assert.equal(woke, true, 'the cooldown timer wakes the waiter at its deadline');
   assert.notEqual(await pool.acquire(), null);
 });
 

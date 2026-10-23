@@ -1,12 +1,12 @@
 {
-  "observedAt": "2026-10-23T11:20:24.184368+00:00",
+  "observedAt": "2026-10-23T11:28:56.364326+00:00",
   "platform": "macOS arm64",
   "unchangedDuringTests": true,
   "tests": {
     "node22": {
       "exitCode": 0,
       "node": "v22.23.3",
-      "logSha256": "d08c203e96016cc4adaa5061598f3a87eef9af5dbf6794e778824b437c5f725b",
+      "logSha256": "788f2d4d1f7c8405083b918fb5ccdbf90ca07e251505fdb8d5c390a737a8d218",
       "tests": 556,
       "pass": 556,
       "fail": 0,
@@ -16,7 +16,7 @@
     "node26": {
       "exitCode": 0,
       "node": "v26.0.0",
-      "logSha256": "865cd30dd2673be20888c8a2f1cef1785559cf09c40af7ac38f40f3a50d023c5",
+      "logSha256": "0e6c6cff6d460b7f51e919bcfd6a53e10c696c62429283e9f36be16329709116",
       "tests": 556,
       "pass": 556,
       "fail": 0,
@@ -352,12 +352,12 @@
       "sha256": "38f809b013ab4be431bb999ea98d137b7be06aaec4490d406b2cc51838106cce"
     },
     "tests/account-login.test.mjs": {
-      "bytes": 111928,
-      "sha256": "5cd355ef9057afe31e0ddbf3b06c6c4371e58d7b9d307e5ab8554dde1facfca2"
+      "bytes": 112697,
+      "sha256": "d6f3ee450cb7bc66e34ad5d2999e2c624e961aefb2f5fa9f9dabfce4544e7e02"
     },
     "tests/account-pool.test.mjs": {
-      "bytes": 26543,
-      "sha256": "0218a7f268b07300c596f70eec3bb7707da79fb44e633b238a2dd1fb2b711902"
+      "bytes": 26831,
+      "sha256": "4d10519d96002edb2dc2f3f91e88ddb6807be7ca2734c4cbf0a586bc491e936f"
     },
     "tests/account-queue.test.mjs": {
       "bytes": 20624,
@@ -555,5 +555,11 @@
     "chatHttpStatus": 502,
     "chatErrorCode": "muse_vm_unavailable",
     "completionReceived": false
+  },
+  "priorCiRun": {
+    "url": "https://github.com/ForgetMeAI/berserk-muse/actions/runs/39945749582",
+    "publicVendorContract": "passed",
+    "node26Matrix": "passed",
+    "node22Matrix": "failed in two timing-dependent test assertions; tests corrected without production changes"
   }
 }
