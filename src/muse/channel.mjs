@@ -1,8 +1,8 @@
 import { MuseChannelError, MuseDelivery } from './rpc.mjs';
 
-export const NOISE_CHANNEL_MODULE_ID = 759572;
-export const HTTP_ROUTE_MODULE_ID = 85461;
-export const GATEWAY_ERROR_MODULE_ID = 925301;
+export const NOISE_CHANNEL_EXPORT = 'NoiseChannel';
+export const HTTP_ROUTE_EXPORT = 'resolveHttpRouteRequest';
+export const GATEWAY_ERROR_EXPORT = 'isGatewayRequestError';
 
 const MAX_PENDING_EVENTS = 1_000;
 const MAX_PENDING_EVENT_BYTES = 1024 * 1024;
@@ -21,9 +21,9 @@ const ALLOWED_METHODS = new Map([
  * matching chat.cancel only. It never reconnects, retries, logs frames, or
  * exposes requests for arbitrary routes.
  *
- * Public first-party source confirms module 759572 exports NoiseChannel,
- * module 85461 exports resolveHttpRouteRequest, and module 925301 exports
- * isGatewayRequestError. `NoiseChannel.sendHttpRequest` resolves the
+ * The semantic export manifest resolves NoiseChannel,
+ * resolveHttpRouteRequest, and isGatewayRequestError from the reviewed public
+ * chunk set. `NoiseChannel.sendHttpRequest` resolves the
  * subscription acknowledgement and dispatches subsequent parsed envelopes
  * to the constructor's handleGatewayMessage callback. The callback is scoped
  * here by the exact session_id proposed in the owned stream request; envelopes
@@ -64,7 +64,7 @@ export class MuseNoiseChannel {
     maxEventBytes = MAX_PENDING_EVENT_BYTES,
     closeWaitMs = MAX_CLOSE_WAIT_MS,
   } = {}) {
-    if (!runtime || typeof runtime.getModule !== 'function' || !connection?.ws || !connection?.transport) {
+    if (!runtime || typeof runtime.getExport !== 'function' || !connection?.ws || !connection?.transport) {
       throw channelError('invalid_channel', MuseDelivery.NOT_SENT);
     }
     if (typeof nodeId !== 'string' || nodeId.trim().length === 0 || nodeId.length > 255) {
@@ -75,20 +75,20 @@ export class MuseNoiseChannel {
       !isBoundedInteger(closeWaitMs, 1, MAX_CLOSE_WAIT_MS)) {
       throw channelError('invalid_limits', MuseDelivery.NOT_SENT);
     }
-    const noiseModule = runtime.getModule(NOISE_CHANNEL_MODULE_ID);
-    const routeModule = runtime.getModule(HTTP_ROUTE_MODULE_ID);
-    const errorModule = runtime.getModule(GATEWAY_ERROR_MODULE_ID);
-    if (typeof noiseModule?.NoiseChannel !== 'function' ||
-      typeof routeModule?.resolveHttpRouteRequest !== 'function' ||
-      typeof errorModule?.isGatewayRequestError !== 'function') {
+    const NoiseChannel = runtime.getExport(NOISE_CHANNEL_EXPORT);
+    const resolveHttpRouteRequest = runtime.getExport(HTTP_ROUTE_EXPORT);
+    const isGatewayRequestError = runtime.getExport(GATEWAY_ERROR_EXPORT);
+    if (typeof NoiseChannel !== 'function' ||
+      typeof resolveHttpRouteRequest !== 'function' ||
+      typeof isGatewayRequestError !== 'function') {
       throw channelError('needs_vendor_assets', MuseDelivery.NOT_SENT);
     }
 
     this.#runtime = runtime;
     this.#connection = connection;
     this.#nodeId = nodeId;
-    this.#routes = routeModule;
-    this.#gatewayErrors = errorModule;
+    this.#routes = { resolveHttpRouteRequest };
+    this.#gatewayErrors = { isGatewayRequestError };
     this.#maxEvents = maxEvents;
     this.#maxEventBytes = maxEventBytes;
     this.#closeWaitMs = closeWaitMs;
@@ -122,7 +122,7 @@ export class MuseNoiseChannel {
     }
     if (ws.readyState === 3) this.#resolveSocketClosed();
 
-    this.#noise = new noiseModule.NoiseChannel({
+    this.#noise = new NoiseChannel({
       ws,
       transport: connection.transport,
       websocketConnectionID: globalThis.crypto.randomUUID(),

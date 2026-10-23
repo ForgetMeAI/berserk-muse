@@ -55,6 +55,43 @@ test('accepts a valid text decision and fenced JSON, but rejects a stale nonce',
   assert.throws(() => parseDecision(envelope('old'), request, { nonce: 'current' }), e => e instanceof ProtocolError && e.status === 502);
 });
 
+test('repairs only invalid JSON backslashes in model text while preserving JSON escape semantics', () => {
+  const request = req();
+  const raw = String.raw`{"request_id":"n","content":"C:\Users\alice\docs\draft.txt; regex \d+\s+\w+; math \(x\) \alpha; Markdown \*note\*","tool_calls":[]}`;
+  const decision = parseDecision(raw, request, { nonce: 'n' });
+  assert.equal(decision.content, String.raw`C:\Users\alice\docs\draft.txt; regex \d+\s+\w+; math \(x\) \alpha; Markdown \*note\*`);
+
+  const validEscapes = String.raw`{"request_id":"n","content":"line\nnext\tquote\" slash\\ unicode\u0041","tool_calls":[]}`;
+  assert.equal(parseDecision(validEscapes, request, { nonce: 'n' }).content, 'line\nnext\tquote" slash\\ unicodeA');
+  assert.throws(() => parseDecision(raw, request, { nonce: 'stale' }), e => e.status === 502 && e.code === 'invalid_model_response');
+});
+
+test('keeps tool arguments strict and still validates their declared schema', () => {
+  const pathTool = { type: 'function', function: { name: 'read_path', parameters: {
+    type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false,
+  } } };
+  const request = req({ tools: [pathTool], tool_choice: 'required' });
+  const raw = String.raw`{"request_id":"n","content":null,"tool_calls":[{"name":"read_path","arguments":{"path":"C:\\Users\\alice\\docs\\draft.txt"}}]}`;
+  const decision = parseDecision(raw, request, { nonce: 'n' });
+  assert.equal(JSON.parse(decision.tool_calls[0].function.arguments).path, String.raw`C:\Users\alice\docs\draft.txt`);
+  const malformedToolArgument = String.raw`{"request_id":"n","content":null,"tool_calls":[{"name":"read_path","arguments":{"path":"C:\Users\alice\docs\draft.txt"}}]}`;
+  assert.throws(() => parseDecision(malformedToolArgument, request, { nonce: 'n' }), e => e.status === 502 && e.code === 'invalid_model_response');
+
+  const invalidSchemaValue = String.raw`{"request_id":"n","content":null,"tool_calls":[{"name":"read_path","arguments":{"path":42}}]}`;
+  assert.throws(() => parseDecision(invalidSchemaValue, request, { nonce: 'n' }), e => e.status === 502 && e.code === 'invalid_model_response');
+});
+
+test('does not guess malformed unicode, escaped quotes, or trailing backslashes', () => {
+  const request = req();
+  for (const raw of [
+    String.raw`{"request_id":"n","content":"bad unicode \u12G4","tool_calls":[]}`,
+    String.raw`{"request_id":"n","content":"bad "quote"","tool_calls":[]}`,
+    String.raw`{"request_id":"n","content":"trailing slash \","tool_calls":[]}`,
+  ]) {
+    assert.throws(() => parseDecision(raw, request, { nonce: 'n' }), e => e.status === 502 && e.code === 'invalid_model_response');
+  }
+});
+
 test('validates tool arguments and emits unique OpenAI tool call IDs', () => {
   const request = req({ tool_choice: 'required' });
   const decision = parseDecision(envelope('n', {
@@ -135,6 +172,7 @@ test('accepts buffered streaming requests and preserves validated OpenCode gener
     user: 'client-user',
   });
   assert.match(buildPrompt(request, { nonce: 'n' }), /"temperature":0.4/);
+  assert.match(buildPrompt(request, { nonce: 'n' }), /encode every literal backslash/);
   assert.throws(() => req({ temperature: 2.1 }), ProtocolError);
   assert.throws(() => req({ top_p: -0.1 }), ProtocolError);
   assert.throws(() => req({ max_tokens: 0 }), ProtocolError);

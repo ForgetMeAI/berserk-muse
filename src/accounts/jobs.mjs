@@ -8,7 +8,7 @@ const ERROR_CODES = new Set([
   'job_queue_full', 'job_capacity', 'internal_error',
   'needs_relogin', 'expired', 'refresh_failed', 'probe_failed', 'session_unavailable',
   'needs_user_interaction', 'needs_mail_auth', 'login_timeout', 'token_exchange_failed',
-  'invalid_token_response', 'browser_unavailable', 'account_mismatch', 'muse_session_unavailable',
+  'invalid_token_response', 'browser_unavailable', 'account_mismatch', 'muse_session_unavailable', 'muse_vm_unavailable',
   'browser_launch_failed', 'browser_launch_timeout', 'browser_permission_denied',
   'muse_navigation_failed', 'muse_navigation_timeout', 'muse_dns_error', 'muse_proxy_error', 'muse_tls_error',
   'unsafe_workspace', 'login_workspace_exists',

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createNoiseRuntime, NoiseRuntimeError, NOISE_CHANNEL_MODULE_ID } from '../src/muse/vendor-runtime.mjs';
+import { createNoiseRuntime, NoiseRuntimeError } from '../src/muse/vendor-runtime.mjs';
 
 const manifest = {
   schema: 1,
@@ -40,19 +40,17 @@ test('allows only exact Muse methods and paths and keeps WebSocket constants', a
   }
   const loaderFactory = async ({ fetchImpl, WebSocketImpl }) => ({
     async close() {},
-    getModule(id) {
-      if (id === NOISE_CHANNEL_MODULE_ID) return { Channel: class {} };
-      if (id === 499475) return {
-        async openNoiseConnection(url, options) {
+    getExport(name) {
+      if (name === 'NoiseChannel') return class {};
+      if (name === 'openNoiseConnection') return async (url, options) => {
           await fetchImpl('/api/hatch/token', { method: 'POST' });
           await fetchImpl('/api/hatch/noise-notary-token', { method: 'POST' });
           websocketStatics = [WebSocketImpl.CONNECTING, WebSocketImpl.OPEN, WebSocketImpl.CLOSING, WebSocketImpl.CLOSED];
           const socket = new WebSocketImpl(validNoiseUrl);
           assert.equal(url, 'wss://hatch.metaaivm.com/');
           return { ws: socket, optionsSignal: options.signal };
-        },
       };
-      throw Object.assign(new Error('missing module'), { code: 'public_module_missing' });
+      throw Object.assign(new Error('missing export'), { code: 'public_export_missing' });
     },
   });
   const runtime = await createNoiseRuntime({
@@ -103,10 +101,10 @@ test('native WebSocket accepts only the observed Hatch Noise endpoint and creden
     fetchImpl: async () => response(),
     loaderFactory: async ({ WebSocketImpl }) => ({
       close() {},
-      getModule(id) {
-        if (id === 499475) return { openNoiseConnection: async (_gateway, { vmName }) => ({
+      getExport(name) {
+        if (name === 'openNoiseConnection') return async (_gateway, { vmName }) => ({
           ws: new WebSocketImpl(urls[vmName]),
-        }) };
+        });
         throw Error();
       },
     }),
@@ -138,7 +136,7 @@ test('allowlist rejects alternate origin, query, method, and path without forwar
     wrappedFetch = options.fetchImpl;
     return {
       close() {},
-      getModule(id) { if (id === 499475) return { openNoiseConnection: async () => ({}) }; throw Error(); },
+    getExport(name) { if (name === 'openNoiseConnection') return async () => ({}); throw Error(); },
     };
   };
   const runtime = await createNoiseRuntime({ assetsDirValidatedManifest: manifest, loaderFactory, fetchImpl: async (...args) => { sent.push(args); return response(); }, WebSocketImpl: class {} });
@@ -168,18 +166,18 @@ test('abort propagates a safe code and close rejects later use', async () => {
   const controller = new AbortController();
   const loaderFactory = async () => ({
     close() {},
-    getModule(id) { if (id === 499475) return { openNoiseConnection: async (_url, { signal }) => new Promise((resolve, reject) => {
+    getExport(name) { if (name === 'openNoiseConnection') return async (_url, { signal }) => new Promise((resolve, reject) => {
       const abort = () => reject(Object.assign(new Error('stop'), { name: 'AbortError' }));
       if (signal.aborted) abort();
       else signal.addEventListener('abort', abort, { once: true });
-    }) }; throw Error(); },
+    }); throw Error(); },
   });
   const runtime = await createNoiseRuntime({ assetsDirValidatedManifest: manifest, loaderFactory, fetchImpl: async () => response(), WebSocketImpl: class {} });
   const pending = runtime.open('wss://test.metaaivm.com/', { signal: controller.signal });
   controller.abort();
   await assert.rejects(pending, error => error instanceof NoiseRuntimeError && error.code === 'runtime_aborted');
   await runtime.close();
-  assert.throws(() => runtime.getModule(499475), error => error.code === 'runtime_closed');
+  assert.throws(() => runtime.getExport('openNoiseConnection'), error => error.code === 'runtime_closed');
 });
 
 test('fails closed when the loader factory cannot validate the prepared cache', async () => {

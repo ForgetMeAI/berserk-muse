@@ -4,7 +4,7 @@ import { AccountStore } from './accounts/store.mjs';
 import { AccountPool, TransportFailure } from './accounts/pool.mjs';
 import { SessionManager } from './muse/session.mjs';
 import { createMuseProtocol } from './muse/http.mjs';
-import { prepareVendor } from './muse/vendor-cache.mjs';
+import { createVendorResolver } from './muse/vendor-discovery.mjs';
 import { createNetworkRuntime } from './net/runtime.mjs';
 import { Telemetry } from './telemetry.mjs';
 import { AccountQueue } from './queue.mjs';
@@ -47,15 +47,16 @@ export async function createApplication({ config, root, stateDir, onShutdown = n
     await telemetry.ready?.();
     await telemetry.init?.();
     eventBus = createPanelEventBus();
-    let prepared;
-    const vendorManifest = async () => {
-      if (!prepared) prepared = (async () => {
+    let vendorResolverPromise;
+    const vendorManifest = async options => {
+      vendorResolverPromise ??= (async () => {
         const lock = JSON.parse(await readFile(join(root, 'docs', 'muse-vendor.lock.json'), 'utf8'));
-        const net = createNetworkRuntime();
-        try { return await prepareVendor({ cacheDir: join(stateDir, 'vendor', 'muse-20261018-v2'), manifest: lock, fetchImpl: net.fetchImpl }); }
-        finally { await net.close(); }
-      })().catch(error => { prepared = undefined; throw error; });
-      return prepared;
+        return createVendorResolver({ cacheDir: join(stateDir, 'vendor', 'muse-client-v1'), lock });
+      })().catch(error => { vendorResolverPromise = undefined; throw error; });
+      const resolveVendor = await vendorResolverPromise;
+      const net = createNetworkRuntime();
+      try { return await resolveVendor({ ...options, fetchImpl: net.fetchImpl }); }
+      finally { await net.close(); }
     };
     const protocol = dependencies.protocol ?? createMuseProtocol({ store, vendorManifest, timeoutMs: config.timeoutMs,
       failureFactory: fields => new TransportFailure(fields) });

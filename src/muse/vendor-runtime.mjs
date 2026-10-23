@@ -1,5 +1,6 @@
 import {
   createPublicChunkLoader,
+  MissingPublicExportError,
   MissingPublicModuleError,
   UnsupportedRuntimeOperationError,
 } from './vendor-loader.mjs';
@@ -9,7 +10,6 @@ const NOISE_WS_ORIGIN = 'wss://hatch.metaaivm.com';
 const NOISE_WS_PATH = '/v1/noise';
 const NOISE_REQUIRED_QUERY = new Set(['vm_id', 'auth_token', 'app_id', 'request_id']);
 const NOISE_OPTIONAL_QUERY = new Set(['notary_token', 'atod_token']);
-export const NOISE_CHANNEL_MODULE_ID = 759572;
 const FETCH_PATHS = new Map([
   ['/api/hatch/token', new Set(['POST'])],
   ['/api/hatch/noise-notary-token', new Set(['POST'])],
@@ -62,12 +62,8 @@ function safeFetch(fetchImpl) {
 
 function sanitizeOpenError(error) {
   if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') return new NoiseRuntimeError('runtime_aborted');
-  if (error instanceof MissingPublicModuleError || error instanceof UnsupportedRuntimeOperationError || error?.code === 'public_module_missing' || error?.code === 'unsupported_runtime_operation') {
+  if (error instanceof MissingPublicModuleError || error instanceof MissingPublicExportError || error instanceof UnsupportedRuntimeOperationError || ['public_module_missing', 'public_export_missing', 'unsupported_runtime_operation'].includes(error?.code)) {
     return new NoiseRuntimeError('needs_vendor_assets');
-  }
-  let cause = error;
-  for (let depth = 0; cause && depth < 4; depth++, cause = cause.cause) {
-    if (typeof cause.stack === 'string' && cause.stack.includes('0d_m8vbe2zoy9.js')) return new NoiseRuntimeError('needs_vendor_assets');
   }
   return new NoiseRuntimeError('noise_runtime_failed');
 }
@@ -157,6 +153,14 @@ export async function createNoiseRuntime({
     catch (error) { throw sanitizeOpenError(error); }
   }
 
+  function getExport(name) {
+    if (closed) throw new NoiseRuntimeError('runtime_closed');
+    try {
+      if (typeof loader.getExport !== 'function') throw new MissingPublicExportError(name);
+      return loader.getExport(name);
+    } catch (error) { throw sanitizeOpenError(error); }
+  }
+
   async function open(gatewayUrl, { vmName, signal, credentialProvider } = {}) {
     if (closed) throw new NoiseRuntimeError('runtime_closed');
     if (!fetchImpl) throw new NoiseRuntimeError('fetch_not_injected');
@@ -179,7 +183,7 @@ export async function createNoiseRuntime({
     if (typeof vmName === 'string') options.vmName = vmName;
     if (credentialProvider) options.credentialProvider = credentialProvider;
     try {
-      const connect = getModule(499475).openNoiseConnection;
+      const connect = getExport('openNoiseConnection');
       const connection = await connect(target.href, options);
       if (closed || combinedSignal.aborted) {
         try { connection?.ws?.close(); } catch {}
@@ -197,6 +201,7 @@ export async function createNoiseRuntime({
   return Object.freeze({
     open,
     getModule,
+    getExport,
     close() {
       if (closePromise) return closePromise;
       closed = true;

@@ -6,6 +6,7 @@ import { createNoiseRuntime, NoiseRuntimeError } from './vendor-runtime.mjs';
 import { MuseNoiseChannel } from './channel.mjs';
 import { MuseRpcClient, MuseRpcError } from './rpc.mjs';
 import { MuseUsageError, parseMuseSubscriptionFlight } from './usage.mjs';
+import { resolveMuseSessionVm } from './vm.mjs';
 
 const ORIGIN = 'https://muse.ai';
 const FINGERPRINT = /^(?:user-agent|accept|accept-language|content-type|origin|referer|sec-fetch-[a-z-]+|sec-ch-[a-z-]+|x-hatch-[a-z-]+)$/;
@@ -74,19 +75,10 @@ function sessionData(session) {
     device: structuredClone(session.device ?? {}), expiresAt: session.expiresAt ?? null };
 }
 
-function vmDescriptor(value) {
-  if (!value || typeof value !== 'object' || typeof value.endpoint_url !== 'string') throw new MuseTransportError('invalid_vm_descriptor');
-  let url;
-  try { url = new URL(value.endpoint_url); } catch { throw new MuseTransportError('invalid_vm_descriptor'); }
-  if (!['https:', 'wss:'].includes(url.protocol) || !url.hostname.endsWith('.metaaivm.com') ||
-    (url.port && url.port !== '443') || url.pathname !== '/' || url.search || url.hash || url.username || url.password) {
-    throw new MuseTransportError('invalid_vm_descriptor');
-  }
-  if (typeof value.vm_id !== 'string' || value.vm_id.length === 0 || value.vm_id.length > 255 ||
-    (value.vm_name != null && (typeof value.vm_name !== 'string' || value.vm_name.length > 255))) {
-    throw new MuseTransportError('invalid_vm_descriptor');
-  }
-  return { gatewayUrl: url.href, vmId: value.vm_id, ...(value.vm_name ? { vmName: value.vm_name } : {}) };
+function vmUnavailable(failureFactory, status) {
+  return transportFailure(failureFactory, 'muse_vm_unavailable', {
+    delivery: 'not_sent', scope: 'account', recoverable: false, ...(Number.isSafeInteger(status) ? { status } : {}),
+  });
 }
 
 function classifyStatus(status) {
@@ -112,24 +104,23 @@ export function createMuseProtocol({
     throw new TypeError('A prepared vendor manifest and transport factories are required.');
   }
 
-  let manifestPromise = null;
-  async function resolveVendorManifest() {
+  async function resolveVendorManifest({ signal, getShell } = {}) {
     if (typeof vendorManifest !== 'function') return vendorManifest;
-    manifestPromise ??= Promise.resolve().then(() => vendorManifest()).then(manifest => {
+    return Promise.resolve().then(() => vendorManifest({ signal, getShell })).then(manifest => {
       if (!manifest || typeof manifest !== 'object' || typeof manifest.assetsDirValidated !== 'string') {
         throw new Error('manifest_unavailable');
       }
       return manifest;
     }).catch(() => {
-      manifestPromise = null;
+      if (signal?.aborted) throw transportFailure(failureFactory, 'request_cancelled', { delivery: 'not_sent', scope: 'request' });
       throw transportFailure(failureFactory, 'needs_vendor_assets', { delivery: 'not_sent', scope: 'service' });
     });
-    return manifestPromise;
   }
 
-  function makeClient(session, network, onCookies, requestTimeoutMs = timeoutMs) {
+  function makeClient(session, network, onCookies, requestTimeoutMs = timeoutMs, maxBytes) {
     return createSessionHttpClient({ allowedOrigins: [ORIGIN], session, fetchImpl: network.fetchImpl,
-      onSessionCookies: jar => onCookies?.(jar.cookies), timeoutMs: Math.min(120000, requestTimeoutMs) });
+      onSessionCookies: jar => onCookies?.(jar.cookies), timeoutMs: Math.min(120000, requestTimeoutMs),
+      ...(maxBytes === undefined ? {} : { maxBytes }) });
   }
 
   async function readUsage(account, session, { signal } = {}) {
@@ -225,7 +216,19 @@ export function createMuseProtocol({
         const failure = classifyStatus(found.status);
         throw transportFailure(failureFactory, failure.code, { ...failure, delivery: 'not_sent' });
       }
-      const vm = vmDescriptor(found.json);
+      const resolution = resolveMuseSessionVm(found.json);
+      if (resolution.kind === 'unavailable') {
+        if (!refresh && probeCookiesChanged && typeof store?.replaceSession === 'function') {
+          try { await store.replaceSession(account.id, session.sessionRevision, next); }
+          catch (error) {
+            if (error?.code !== 'session_conflict') throw transportFailure(failureFactory, 'probe_cookie_persistence_failed', { delivery: 'not_sent', scope: 'service' });
+          }
+        }
+        if (refresh) throw vmUnavailable(failureFactory, found.status);
+        return { valid: true, expiresAt: null };
+      }
+      if (resolution.kind !== 'vm') throw vmUnavailable(failureFactory, found.status);
+      const vm = resolution.descriptor;
       if (!refresh) {
         if (probeCookiesChanged && typeof store?.replaceSession === 'function') {
           try {
@@ -288,7 +291,7 @@ class MuseHttpTransport {
     try {
       if (signal?.aborted) throw transportFailure(this.failureFactory, 'request_cancelled', { delivery: 'not_sent', scope: 'request' });
       this.network = this.networkFactory();
-      const client = this.makeClient(this.bundle, this.network, cookies => { this.bundle.cookies = cookies; this.dirty = true; });
+      const client = this.makeClient(this.bundle, this.network, cookies => { this.bundle.cookies = cookies; this.dirty = true; }, this.timeoutMs, 4 * 1024 * 1024);
       const request = async (url, init = {}) => {
         const headers = new Headers(fingerprintHeaders(this.bundle, { json: init.method === 'POST' }));
         for (const [key, value] of new Headers(init.headers ?? {})) headers.set(key, value);
@@ -302,7 +305,9 @@ class MuseHttpTransport {
         const detail = this.lastHttpFailure ?? classifyStatus(discovered.status);
         throw transportFailure(this.failureFactory, detail.code, { ...detail, delivery: 'not_sent' });
       }
-      const vm = vmDescriptor(discovered.json);
+      const resolution = resolveMuseSessionVm(discovered.json);
+      if (resolution.kind !== 'vm') throw vmUnavailable(this.failureFactory, discovered.status);
+      const vm = resolution.descriptor;
       this.bundle.device.upstream = vm;
       this.bundle.device.id ??= randomUUID();
       this.dirty = true;
@@ -312,7 +317,12 @@ class MuseHttpTransport {
         const detail = this.lastHttpFailure ?? classifyStatus(awake.status);
         throw transportFailure(this.failureFactory, detail.code, { ...detail, delivery: 'not_sent' });
       }
-      const assetsDirValidatedManifest = await this.resolveVendorManifest();
+      const getShell = async ({ signal: shellSignal } = {}) => {
+        const response = await client.request(`${ORIGIN}/`, { signal: shellSignal ?? signal });
+        if (response.status !== 200) throw new Error('shell_unavailable');
+        return response.bodyText;
+      };
+      const assetsDirValidatedManifest = await this.resolveVendorManifest({ signal, getShell });
       this.runtime = await this.vendorFactory({
         assetsDirValidatedManifest,
         WebSocketImpl: this.network.WebSocketImpl,

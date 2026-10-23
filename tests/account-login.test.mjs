@@ -19,9 +19,9 @@ async function makeRoot() {
   return mkdtemp(path.join(base, 'berserk-login-test-'));
 }
 
-function sessionResponse({ headers = {}, status = 200, body = { endpoint_url: 'https://gateway.example/api', vm_name: 'vm-test', vm_id: 'vm-id-test' }, method = 'GET', onJson = null } = {}) {
+function sessionResponse({ url = 'https://muse.ai/api/session', headers = {}, status = 200, body = { endpoint_url: 'https://gateway.example/api', vm_name: 'vm-test', vm_id: 'vm-id-test' }, method = 'GET', onJson = null } = {}) {
   return {
-    url: () => 'https://muse.ai/api/session',
+    url: () => url,
     status: () => status,
     async json() {
       const result = onJson?.();
@@ -145,6 +145,13 @@ class FakePage extends EventEmitter {
     if (selector === 'input[type="email"]:visible') {
       const input = {
         count: async () => this.manual.emailInput === false || this.manual.emailType === 'text' ? 0 : 1,
+        isVisible: async () => this.manual.emailInput !== false,
+        isEditable: async () => this.manual.emailEditable !== false,
+        evaluate: async () => {
+          this.reactReadinessChecks = (this.reactReadinessChecks || 0) + 1;
+          return this.manual.reactNeverReady !== true &&
+            this.reactReadinessChecks >= (this.manual.reactReadyAfterChecks || 1);
+        },
         fill: async value => { this.setEmailByFill(value); },
       };
       if (!this.manual.omitInputValue) {
@@ -163,7 +170,8 @@ class FakePage extends EventEmitter {
         isVisible: async () => otpCount() === 1 && this.manual.otpVisible !== false,
         isEnabled: async () => {
           this.manual.otpOnEnabled?.();
-          return otpCount() === 1 && this.manual.otpEnabled !== false;
+          return otpCount() === 1 && this.manual.otpEnabled !== false &&
+            !(this.manual.otpDisableAfterFill && this.enteredOtp !== null);
         },
         inputValue: async () => this.manual.otpValueOverride ?? this.enteredOtp ?? '',
         fill: async value => {
@@ -205,7 +213,25 @@ class FakePage extends EventEmitter {
       ...(!this.manual.omitIsEnabled && isContinue ? {
         isEnabled: async () => {
           this.manual.onContinueEnabled?.();
-          return this.manual.continueEnabled !== false;
+          this.continueEnabledChecks = (this.continueEnabledChecks || 0) + 1;
+          return this.manual.continueEnabled !== false ||
+            this.continueEnabledChecks >= (this.manual.continueEnabledAfterChecks || Number.POSITIVE_INFINITY);
+        },
+      } : {}),
+      ...(isOtpTextbox ? {
+        isEnabled: async () => {
+          this.manual.otpOnEnabled?.();
+          const count = this.manual.otpInputMissing ? 0 : this.manual.otpInputAmbiguous ? 2 : this.otpVisible ? 1 : 0;
+          return count === 1 && this.manual.otpEnabled !== false &&
+            !(this.manual.otpDisableAfterFill && this.enteredOtp !== null);
+        },
+      } : {}),
+      ...(isEmailTextbox ? {
+        isEditable: async () => this.manual.emailEditable !== false,
+        evaluate: async () => {
+          this.reactReadinessChecks = (this.reactReadinessChecks || 0) + 1;
+          return this.manual.reactNeverReady !== true &&
+            this.reactReadinessChecks >= (this.manual.reactReadyAfterChecks || 1);
         },
       } : {}),
       ...(!this.manual.omitInputValue && isEmailTextbox ? {
@@ -226,8 +252,9 @@ class FakePage extends EventEmitter {
         if (isContinue) this.clickTimeouts.push(options?.timeout ?? null);
         if (isContinue && this.manual.continueClickFails) throw new Error('private click failure sentinel');
         if (isContinue && this.manual.continueEnabled === false) {
-          if (this.manual.enableOnClick === true) this.manual.continueEnabled = true;
-          else throw new Error('private disabled click sentinel');
+          if (this.continueEnabledChecks >= (this.manual.continueEnabledAfterChecks || Number.POSITIVE_INFINITY)) {
+            this.manual.continueEnabled = true;
+          } else throw new Error('private disabled click sentinel');
         }
         if (isContinue && this.manual.clearEmailOnContinueClick) {
           this.emailFieldValue = '';
@@ -257,11 +284,21 @@ class FakePage extends EventEmitter {
 
   async evaluate(_fn, args) {
     if (args?.probeSession === true) {
+      this.sessionProbeSource = String(_fn);
       this.sessionProbeCalls++;
       this.sessionProbeHook?.(this.sessionProbeCalls, args);
       if (this.sessionProbePending) return new Promise(() => {});
       const status = this.sessionProbeSequence?.length ? this.sessionProbeSequence.shift() : 401;
-      if (status === 200) this.emit('response', sessionResponse());
+      if (status === 200) this.emit('response', sessionResponse({
+        ...this.manual.sessionProbeResponseOptions,
+        url: this.manual.sessionProbeUrl ?? this.manual.sessionProbeResponseOptions?.url,
+      }));
+      if (Object.hasOwn(this.manual, 'sessionProbeBody') && status === 200) {
+        return { status, responseUrl: this.manual.sessionProbeUrl ?? 'https://muse.ai/api/session',
+          bodyParsed: this.manual.sessionProbeBodyParsed !== false,
+          ...(this.manual.sessionProbeBodyParsed === false ? {} : { body: this.manual.sessionProbeBody }),
+          ...(this.manual.sessionProbeOversized === true ? { oversized: true } : {}) };
+      }
       return { status };
     }
     if (args && Object.hasOwn(args, 'endpointUrl')) {
@@ -433,6 +470,54 @@ test('captures a secure WebSocket gateway descriptor and stores it in a validate
   }
 });
 
+test('captures the preferred VM from the assigned inventory before exchanging a token', async () => {
+  const rootDir = await makeRoot();
+  const fake = fakeChromium({ page: new FakePage({ sessionResponseOptions: { body: {
+    status: 'assigned',
+    vms: [
+      { id: 'first-vm', endpoint_url: 'https://first.metaaivm.com/' },
+      { id: 'preferred-vm', endpoint_url: 'wss://preferred.metaaivm.com/', is_preferred: true },
+    ],
+  } } }) });
+  try {
+    const bootstrapper = new BrowserSessionBootstrapper({ chromium: fake.chromium, rootDir, pollMs: 1 });
+    const session = await bootstrapper.login(ACCOUNT);
+    assert.deepEqual(session.upstream, {
+      gatewayUrl: 'wss://preferred.metaaivm.com/', vmId: 'preferred-vm', vmName: 'preferred-vm',
+    });
+    assert.deepEqual(fake.page.tokenRequest, {
+      endpointUrl: 'wss://preferred.metaaivm.com/', vmName: 'preferred-vm', timeoutMs: 30_000,
+    });
+    assert.deepEqual(validateSessionInput({
+      cookies: session.cookies,
+      tokens: session.tokens,
+      device: { ...session.device, upstream: session.upstream },
+    }).device.upstream, session.upstream);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('an authenticated Muse session with no available VM ends with an explicit VM-unavailable message', async () => {
+  const rootDir = await makeRoot();
+  const fake = fakeChromium({ page: new FakePage({ sessionResponseOptions: { body: { status: 'unavailable' } } }) });
+  let now = 10_000;
+  try {
+    const bootstrapper = new BrowserSessionBootstrapper({ chromium: fake.chromium, rootDir,
+      timeoutMs: 100, manualTimeoutMs: 15, pollMs: 1,
+      clock: () => now, sleep: async ms => { now += ms; } });
+    await assert.rejects(bootstrapper.login(ACCOUNT), error => {
+      assert.equal(error.code, 'muse_vm_unavailable');
+      assert.match(error.message, /VM available/i);
+      return true;
+    });
+    assert.equal(fake.page.tokenRequest, null);
+    assert.deepEqual(fake.context.cookieOrigins, []);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('rejects invalid or overlong nonempty vm_name without exchanging a token', async () => {
   for (const vmName of [42, 'x'.repeat(256)]) {
     const rootDir = await makeRoot();
@@ -469,9 +554,9 @@ test('reports bounded safe metadata for exact Muse GET session responses and par
     assert.equal(session.upstream.vmName, undefined);
     assert.equal(non200BodyReads, 0);
     assert.deepEqual(diagnostics.filter(event => event.stage === 'session_response'), [
-      { stage: 'session_response', httpStatus: 401, bodyParsed: false, endpointPresent: false, vmIdPresent: false, vmNamePresent: false, accepted: false },
-      { stage: 'session_response', httpStatus: 403, bodyParsed: false, endpointPresent: false, vmIdPresent: false, vmNamePresent: false, accepted: false },
-      { stage: 'session_response', httpStatus: 200, bodyParsed: true, endpointPresent: true, vmIdPresent: true, vmNamePresent: false, accepted: true },
+      { stage: 'session_response', httpStatus: 401, bodyParsed: false, endpointPresent: false, vmIdPresent: false, vmNamePresent: false, accepted: false, vmUnavailable: false },
+      { stage: 'session_response', httpStatus: 403, bodyParsed: false, endpointPresent: false, vmIdPresent: false, vmNamePresent: false, accepted: false, vmUnavailable: false },
+      { stage: 'session_response', httpStatus: 200, bodyParsed: true, endpointPresent: true, vmIdPresent: true, vmNamePresent: false, accepted: true, vmUnavailable: false },
     ]);
     assert.equal(JSON.stringify(diagnostics).includes('response sentinel'), false);
   } finally {
@@ -515,6 +600,201 @@ test('discovers an OTP-autoverified Muse session without a passive session respo
   }
 });
 
+test('waits for session proof after Muse disables the OTP control on fill without retrying submission', async () => {
+  const rootDir = await makeRoot();
+  const fake = fakeChromium({ page: new FakePage({
+    otpFlow: true, sessionOnContinue: false, sessionProbeSequence: [200],
+    manual: { continueMissingAfterOtp: true, otpDisableAfterFill: true },
+  }) });
+  let now = 10_000;
+  const diagnostics = [];
+  try {
+    const bootstrapper = new BrowserSessionBootstrapper({ chromium: fake.chromium, rootDir,
+      timeoutMs: 100, manualTimeoutMs: 500, pollMs: 1, clock: () => now,
+      sleep: async ms => { now += ms; },
+      onDiagnostic: event => diagnostics.push(event),
+      mailClient: { async fetchLatest() { return [{
+        id: 'message-1', from: 'notification@email.meta.com', to: 'person+tag@example.com',
+        receivedAt: new Date(10_000).toISOString(), subject: 'Verification', text: 'Code: 123456',
+      }]; } },
+    });
+    const session = await bootstrapper.login(ACCOUNT);
+    assert.equal(session.tokens.accessToken, 'token-from-fake-official-endpoint');
+    assert.deepEqual(fake.page.otpSequentialInputs, [{ value: '123456', options: { delay: 20, timeout: 5_000 } }]);
+    assert.equal(fake.page.otpEnterCount, 0);
+    assert.equal(fake.page.continueClicks, 1, 'only the original email submit occurred');
+    assert.equal(fake.page.sessionProbeCalls, 1);
+    assert.deepEqual(diagnostics.filter(event => event.stage === 'otp_submit'), [
+      { stage: 'otp_submit', outcome: 'auto_verifying' },
+    ]);
+    assert.equal(diagnostics.some(event => event.stage === 'verification' && event.outcome === 'needs_user_interaction'), false);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('uses bounded in-page session JSON when Playwright response parsing fails', async () => {
+  const rootDir = await makeRoot();
+  const expectedHeaders = {
+    'user-agent': 'Fake Muse Browser', 'x-hatch-device': 'device-fingerprint',
+    cookie: 'must-not-be-captured', authorization: 'must-not-be-captured',
+  };
+  const fake = fakeChromium({ page: new FakePage({
+    otpFlow: true, sessionOnContinue: false, sessionProbeSequence: [200],
+    manual: {
+      continueMissingAfterOtp: true, otpDisableAfterFill: true,
+      sessionProbeBody: { status: 'assigned', vms: [{ id: 'probe-vm', endpoint_url: 'https://probe.metaaivm.com/' }] },
+      sessionProbeResponseOptions: {
+        headers: expectedHeaders,
+        onJson: () => Promise.reject(new Error('synthetic response body unavailable')),
+      },
+    },
+  }) });
+  let now = 10_000;
+  try {
+    const bootstrapper = new BrowserSessionBootstrapper({ chromium: fake.chromium, rootDir,
+      timeoutMs: 100, manualTimeoutMs: 500, pollMs: 1, clock: () => now,
+      sleep: async ms => { now += ms; },
+      mailClient: { async fetchLatest() { return [{
+        id: 'message-1', from: 'notification@email.meta.com', to: 'person+tag@example.com',
+        receivedAt: new Date(10_000).toISOString(), subject: 'Verification', text: 'Code: 123456',
+      }]; } },
+    });
+    const session = await bootstrapper.login(ACCOUNT);
+    assert.deepEqual(session.upstream, { gatewayUrl: 'https://probe.metaaivm.com/', vmId: 'probe-vm', vmName: 'probe-vm' });
+    assert.deepEqual(session.device.headers, { 'user-agent': 'Fake Muse Browser', 'x-hatch-device': 'device-fingerprint' });
+    assert.equal(fake.page.tokenRequest.endpointUrl, 'https://probe.metaaivm.com/');
+    assert.equal(fake.page.otpEnterCount, 0);
+    assert.equal(fake.page.sessionProbeCalls, 1);
+    assert.match(fake.page.sessionProbeSource, /redirect:\s*['"]error['"]/);
+    assert.deepEqual(fake.context.cookieOrigins, ['https://muse.ai']);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reports explicit VM-unavailable status recovered by the page probe after Playwright body failure', async () => {
+  const rootDir = await makeRoot();
+  const fake = fakeChromium({ page: new FakePage({
+    otpFlow: true, sessionOnContinue: false, sessionProbeSequence: [200],
+    manual: {
+      continueMissingAfterOtp: true, otpDisableAfterFill: true,
+      sessionProbeBody: { status: 'unavailable', issueKind: 'retryable' },
+      sessionProbeResponseOptions: { onJson: () => Promise.reject(new Error('synthetic response body unavailable')) },
+    },
+  }) });
+  let now = 10_000;
+  const diagnostics = [];
+  try {
+    const bootstrapper = new BrowserSessionBootstrapper({ chromium: fake.chromium, rootDir,
+      timeoutMs: 100, manualTimeoutMs: 500, pollMs: 1, clock: () => now,
+      sleep: async ms => { now += ms; },
+      onDiagnostic: event => diagnostics.push(event),
+      mailClient: { async fetchLatest() { return [{
+        id: 'message-1', from: 'notification@email.meta.com', to: 'person+tag@example.com',
+        receivedAt: new Date(10_000).toISOString(), subject: 'Verification', text: 'Code: 123456',
+      }]; } },
+    });
+    await assert.rejects(bootstrapper.login(ACCOUNT), error => error.code === 'muse_vm_unavailable');
+    const sessionEvents = diagnostics.filter(event => event.stage === 'session_response');
+    assert.ok(sessionEvents.some(event => event.bodyParsed === false));
+    assert.ok(sessionEvents.some(event => event.bodyParsed === true && event.vmUnavailable === true && !event.accepted));
+    assert.equal(fake.page.tokenRequest, null);
+    assert.deepEqual(fake.context.cookieOrigins, []);
+    assert.equal(fake.page.otpEnterCount, 0);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reports VM unavailability after two session failures and does not enter a false extended manual wait', async () => {
+  const rootDir = await makeRoot();
+  let page;
+  page = new FakePage({
+    otpFlow: true, sessionOnContinue: false, sessionProbeSequence: [200],
+    manual: {
+      continueMissingAfterOtp: true,
+      otpOnEnter: () => {
+        page.emit('response', sessionResponse({ status: 401 }));
+        page.emit('response', sessionResponse({
+          status: 200, onJson: () => Promise.reject(new Error('synthetic session body unavailable')),
+        }));
+      },
+      sessionProbeBody: { status: 'unavailable', issueKind: 'retryable' },
+      sessionProbeResponseOptions: { onJson: () => Promise.reject(new Error('synthetic session body unavailable')) },
+    },
+  });
+  const fake = fakeChromium({ page });
+  const startAt = 10_000;
+  let now = startAt;
+  const phases = [];
+  const diagnostics = [];
+  try {
+    const bootstrapper = new BrowserSessionBootstrapper({ chromium: fake.chromium, rootDir,
+      timeoutMs: 100, manualTimeoutMs: 600_000, pollMs: 1, clock: () => now,
+      sleep: async ms => { now += ms; },
+      onDiagnostic: event => diagnostics.push(event),
+      mailClient: { async fetchLatest() { return [{
+        id: 'message-1', from: 'notification@email.meta.com', to: 'person+tag@example.com',
+        receivedAt: new Date(startAt).toISOString(), subject: 'Verification', text: 'Code: 123456',
+      }]; } },
+    });
+    await assert.rejects(bootstrapper.login(ACCOUNT, { setPhase: phase => phases.push(phase) }),
+      error => error.code === 'muse_vm_unavailable');
+    const sessionEvents = diagnostics.filter(event => event.stage === 'session_response');
+    assert.deepEqual(sessionEvents, [
+      { stage: 'session_response', httpStatus: 401, bodyParsed: false, endpointPresent: false, vmIdPresent: false, vmNamePresent: false, accepted: false, vmUnavailable: false },
+      { stage: 'session_response', httpStatus: 200, bodyParsed: false, endpointPresent: false, vmIdPresent: false, vmNamePresent: false, accepted: false, vmUnavailable: false },
+      { stage: 'session_response', httpStatus: 200, bodyParsed: true, endpointPresent: false, vmIdPresent: false, vmNamePresent: false, accepted: false, vmUnavailable: true },
+    ]);
+    assert.equal(fake.page.sessionProbeCalls, 1);
+    assert.equal(phases.includes('waiting_for_user'), false);
+    assert.ok(now - startAt <= 101, 'the known unavailable VM does not add the manual timeout');
+    assert.equal(fake.page.tokenRequest, null);
+    assert.deepEqual(fake.context.cookieOrigins, []);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('invalid, oversized, and unauthorized page-probe bodies cannot establish session proof', async () => {
+  for (const item of [
+    { status: 200, bodyParsed: false },
+    { status: 200, bodyParsed: false, oversized: true },
+    { status: 401, bodyParsed: false },
+    { status: 200, bodyParsed: true, responseUrl: 'https://muse.ai.attacker.example/api/session' },
+  ]) {
+    const rootDir = await makeRoot();
+    const fake = fakeChromium({ page: new FakePage({
+      otpFlow: true, sessionOnContinue: false, sessionProbeSequence: [item.status],
+      manual: {
+        continueMissingAfterOtp: true, otpDisableAfterFill: true,
+        sessionProbeBody: { status: 'assigned', vms: [{ id: 'must-not-accept', endpoint_url: 'https://probe.metaaivm.com/' }] },
+        sessionProbeBodyParsed: item.bodyParsed,
+        sessionProbeOversized: item.oversized === true,
+        sessionProbeUrl: item.responseUrl,
+        sessionProbeResponseOptions: { onJson: () => Promise.reject(new Error('synthetic response body unavailable')) },
+      },
+    }) });
+    let now = 10_000;
+    try {
+      const bootstrapper = new BrowserSessionBootstrapper({ chromium: fake.chromium, rootDir,
+        timeoutMs: 100, manualTimeoutMs: 500, pollMs: 1, clock: () => now,
+        sleep: async ms => { now += ms; },
+        mailClient: { async fetchLatest() { return [{
+          id: 'message-1', from: 'notification@email.meta.com', to: 'person+tag@example.com',
+          receivedAt: new Date(10_000).toISOString(), subject: 'Verification', text: 'Code: 123456',
+        }]; } },
+      });
+      await assert.rejects(bootstrapper.login(ACCOUNT), error => error.code === 'needs_user_interaction');
+      assert.equal(fake.page.tokenRequest, null);
+      assert.deepEqual(fake.context.cookieOrigins, []);
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('manual completion can discover an already-authenticated session through the Muse page probe', async () => {
   const rootDir = await makeRoot();
   const fake = fakeChromium({ page: new FakePage({
@@ -536,7 +816,7 @@ test('manual completion can discover an already-authenticated session through th
 
 test('missing or disabled OTP input never triggers the Enter fallback', async () => {
   for (const item of [
-    { manual: { continueMissingAfterOtp: true, otpDisappearAfterFill: true }, outcome: 'input_missing' },
+    { manual: { continueMissingAfterOtp: true, otpDisappearAfterFill: true }, outcome: 'auto_verifying' },
     { manual: { continueMissingAfterOtp: true, otpEnabled: false }, outcome: 'input_disabled' },
   ]) {
     const rootDir = await makeRoot();
@@ -1024,7 +1304,7 @@ test('OTP submit reports missing input once, then reports the specific terminal 
   for (const item of [
     { manual: { otpInputMissing: true }, outcome: 'input_missing', finalCode: 'needs_user_interaction' },
     { manual: { otpInputAmbiguous: true }, outcome: 'input_ambiguous', finalCode: 'needs_user_interaction' },
-    { manual: { continueMissingAfterOtp: true, otpDisappearAfterFill: true }, outcome: 'input_missing', finalCode: 'needs_user_interaction' },
+    { manual: { continueMissingAfterOtp: true, otpDisappearAfterFill: true }, outcome: 'auto_verifying', finalCode: 'needs_user_interaction' },
     { manual: { continueMissingAfterOtp: true, otpVisible: false }, outcome: 'input_hidden', finalCode: 'needs_user_interaction' },
     { manual: { continueMissingAfterOtp: true, otpEnabled: false }, outcome: 'input_disabled', finalCode: 'needs_user_interaction' },
     { manual: { continueMissingAfterOtp: true, otpValueOverride: 'stale-code' }, outcome: 'input_value_changed', finalCode: 'needs_user_interaction' },
@@ -1051,6 +1331,10 @@ test('OTP submit reports missing input once, then reports the specific terminal 
       assert.deepEqual(diagnostics.filter(event => event.stage === 'otp_submit'), [
         { stage: 'otp_submit', outcome: item.outcome },
       ]);
+      if (item.outcome === 'input_disabled') {
+        assert.deepEqual(fake.page.otpFillValues, [], 'a disabled OTP field is rejected before any fill');
+        assert.deepEqual(fake.page.otpSequentialInputs, []);
+      }
       assert.equal(fake.page.continueClicks, 1, 'only the send-code click occurred');
       const serialized = JSON.stringify(diagnostics);
       assert.equal(serialized.includes('123456'), false);
@@ -1065,7 +1349,7 @@ test('OTP submit reports missing input once, then reports the specific terminal 
 test('email submission failures hand off once with fixed button-state diagnostics', async () => {
   for (const item of [
     { manual: { continue: false }, outcome: 'button_missing', count: 'none', visible: null, enabled: null, clicks: 0 },
-    { manual: { continueEnabled: false }, outcome: 'button_disabled', count: 'one', visible: true, enabled: false, clicks: 1 },
+    { manual: { continueEnabled: false }, outcome: 'button_disabled', count: 'one', visible: true, enabled: false, clicks: 0 },
     { manual: { continueClickFails: true }, outcome: 'click_failed', count: 'one', visible: true, enabled: true, clicks: 1 },
   ]) {
     const rootDir = await makeRoot();
@@ -1112,10 +1396,10 @@ test('email diagnostic says submitted only after one continue click, including o
   }
 });
 
-test('email submit waits for one initially disabled button click and reports only whether the value remains', async () => {
+test('email submit waits for React hydration and an enabled Continue button before one click', async () => {
   const rootDir = await makeRoot();
   const fake = fakeChromium({ page: new FakePage({ manual: {
-    emailType: 'text', continueEnabled: false, enableOnClick: true, clearEmailOnContinueClick: true,
+    reactReadyAfterChecks: 3, continueEnabled: false, continueEnabledAfterChecks: 2, clearEmailOnContinueClick: true,
   } }) });
   const diagnostics = [];
   try {
@@ -1132,6 +1416,29 @@ test('email submit waits for one initially disabled button click and reports onl
     });
     assert.equal(JSON.stringify(event).includes('person+tag@example.com'), false);
     assert.equal(fake.page.readEmailValue(), '');
+    assert.ok(fake.page.reactReadinessChecks >= 3);
+    assert.ok(fake.page.continueEnabledChecks >= 2);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('email submit falls back safely when the React input handler never becomes ready', async () => {
+  const rootDir = await makeRoot();
+  const fake = fakeChromium({ page: new FakePage({ sessionOnContinue: false, manual: { reactNeverReady: true } }) });
+  const diagnostics = [];
+  try {
+    const bootstrapper = new BrowserSessionBootstrapper({ chromium: fake.chromium, rootDir,
+      timeoutMs: 100, manualTimeoutMs: 8, pollMs: 1,
+      mailClient: { async fetchLatest() { throw new Error('must not poll before a submitted request'); } },
+      onDiagnostic: event => diagnostics.push(event) });
+    await assert.rejects(bootstrapper.login(ACCOUNT), error => error.code === 'needs_user_interaction');
+    assert.deepEqual(diagnostics.filter(event => event.stage === 'email_submit'), [{
+      stage: 'email_submit', outcome: 'input_not_ready', buttonCount: 'none',
+      buttonVisible: null, buttonEnabled: null, emailMatches: null,
+    }]);
+    assert.equal(fake.page.emailFillValues.length, 0);
+    assert.equal(fake.page.continueClicks, 0);
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }
@@ -1956,7 +2263,7 @@ test('stalled session response JSON is bounded by login deadline and cannot muta
     assert.equal(fake.page.tokenRequest, null);
     assert.deepEqual(diagnostics.filter(event => event.stage === 'session_response'), [{
       stage: 'session_response', httpStatus: 200, bodyParsed: false,
-      endpointPresent: false, vmIdPresent: false, vmNamePresent: false, accepted: false,
+      endpointPresent: false, vmIdPresent: false, vmNamePresent: false, accepted: false, vmUnavailable: false,
     }]);
     resolveJson({ endpoint_url: 'https://gateway.example/api', vm_name: 'late-vm', vm_id: 'late-id' });
     await new Promise(resolve => setImmediate(resolve));

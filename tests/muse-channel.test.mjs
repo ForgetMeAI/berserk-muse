@@ -2,10 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MuseDelivery, MuseChannelError, MuseRpcClient } from '../src/muse/rpc.mjs';
 import {
-  GATEWAY_ERROR_MODULE_ID,
-  HTTP_ROUTE_MODULE_ID,
+  GATEWAY_ERROR_EXPORT,
+  HTTP_ROUTE_EXPORT,
   MuseNoiseChannel,
-  NOISE_CHANNEL_MODULE_ID,
+  NOISE_CHANNEL_EXPORT,
 } from '../src/muse/channel.mjs';
 
 const OPEN = 1;
@@ -65,18 +65,14 @@ function makeHarness({ ack = null, onSend, prewrite = false, maxEvents, maxEvent
     'chat.cancel': { method: 'chat.cancel', httpMethod: 'POST', path: '/chat/cancel', noiseOnly: true },
   };
   const runtime = {
-    getModule(id) {
-      if (id === NOISE_CHANNEL_MODULE_ID) return { NoiseChannel: FakeNoiseChannel };
-      if (id === HTTP_ROUTE_MODULE_ID) return {
-        resolveHttpRouteRequest(method, params) {
+    getExport(name) {
+      if (name === NOISE_CHANNEL_EXPORT) return FakeNoiseChannel;
+      if (name === HTTP_ROUTE_EXPORT) return function resolveHttpRouteRequest(method, params) {
           const route = routeSpecs[method];
           return route ? { route, path: route.path, params: { ...params } } : null;
-        },
       };
-      if (id === GATEWAY_ERROR_MODULE_ID) return {
-        isGatewayRequestError(error) { return error instanceof FakeOfficialGatewayError; },
-      };
-      throw new Error('unknown module');
+      if (name === GATEWAY_ERROR_EXPORT) return function isGatewayRequestError(error) { return error instanceof FakeOfficialGatewayError; };
+      throw new Error('unknown export');
     },
   };
   const channel = new MuseNoiseChannel({

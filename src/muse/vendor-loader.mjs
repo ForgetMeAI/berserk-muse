@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
@@ -8,6 +8,15 @@ const MAX_ASSET_BYTES = 2 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 25 * 1024 * 1024;
 const ASSET_NAME = /^[A-Za-z0-9_-]+\.js$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+const REQUIRED_PUBLIC_EXPORTS = new Set([
+  'openNoiseConnection',
+  'NoiseChannel',
+  'resolveHttpRouteRequest',
+  'isGatewayRequestError',
+]);
+const MAX_FACTORY_SOURCE_BYTES = 256 * 1024;
+const MAX_EXPORT_TABLE_BYTES = 64 * 1024;
+const MAX_FACTORY_EXECUTION_MS = 3_000;
 
 export class VendorAssetsError extends Error {
   constructor() {
@@ -23,6 +32,15 @@ export class MissingPublicModuleError extends Error {
     this.name = 'MissingPublicModuleError';
     this.code = 'public_module_missing';
     this.moduleId = id;
+  }
+}
+
+export class MissingPublicExportError extends Error {
+  constructor(name) {
+    super(`Public export ${name} is not uniquely available in the local chunk set`);
+    this.name = 'MissingPublicExportError';
+    this.code = 'public_export_missing';
+    this.exportName = name;
   }
 }
 
@@ -71,6 +89,38 @@ function frozenWindow(localStorage, sessionStorage) {
 function safeConsole() {
   const noop = () => {};
   return Object.freeze({ debug: noop, error: noop, info: noop, log: noop, trace: noop, warn: noop });
+}
+
+/** Read only the compact export tables emitted by the public chunk runtime. */
+export function declaredPublicExports(factory) {
+  let source;
+  try { source = Function.prototype.toString.call(factory); } catch { return new Set(); }
+  if (Buffer.byteLength(source, 'utf8') > MAX_FACTORY_SOURCE_BYTES) return new Set();
+  const names = new Set();
+  // Turbopack's runtime.s call has alternating export-name/marker/value entries.
+  // The bounded capture avoids parsing or executing arbitrary module bodies.
+  const tables = /\.s\s*\(\s*\[([\s\S]{0,65536}?)\]\s*(?:,\s*\d+\s*)?\)/g;
+  for (const table of source.matchAll(tables)) {
+    const body = table[1];
+    if (Buffer.byteLength(body, 'utf8') > MAX_EXPORT_TABLE_BYTES) continue;
+    const entries = /(?:^|,)\s*(["'])([A-Za-z_$][\w$]*)\1\s*,\s*(?:\d+\s*,|function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/g;
+    for (const entry of body.matchAll(entries)) {
+      if (REQUIRED_PUBLIC_EXPORTS.has(entry[2])) names.add(entry[2]);
+    }
+  }
+  return names;
+}
+
+export function declaredPublicModuleIds(factory) {
+  let source;
+  try { source = Function.prototype.toString.call(factory); } catch { return new Set(); }
+  if (Buffer.byteLength(source, 'utf8') > MAX_FACTORY_SOURCE_BYTES) return new Set();
+  const ids = new Set();
+  const tables = /\.s\s*\(\s*\[[\s\S]{0,65536}?\]\s*,\s*(\d+)\s*\)/g;
+  for (const match of source.matchAll(tables)) {
+    if (Number.isSafeInteger(Number(match[1]))) ids.add(Number(match[1]));
+  }
+  return ids;
 }
 
 /**
@@ -241,7 +291,7 @@ export async function createPublicChunkLoader({
         pendingIds.push(item);
       } else if (typeof item === 'function') {
         if (pendingIds.length > 0) {
-          const record = { ids: [...pendingIds], factory: item, asset };
+          const record = { ids: [...pendingIds], factory: item, asset, declaredExports: declaredPublicExports(item) };
           const idsForAsset = assetModuleIds.get(asset) ?? new Set();
           for (const id of pendingIds) idsForAsset.add(id);
           assetModuleIds.set(asset, idsForAsset);
@@ -259,6 +309,25 @@ export async function createPublicChunkLoader({
   let currentGroup = [];
   let currentModuleId = null;
   let activeModuleObject = null;
+  const factoryInvocationKey = `__museVendorFactory_${randomUUID().replaceAll('-', '')}`;
+
+  const exportCandidates = new Map([...REQUIRED_PUBLIC_EXPORTS].map(name => [name, new Set()]));
+  for (const record of new Set(modules.values())) {
+    for (const name of record.declaredExports) exportCandidates.get(name)?.add(record);
+  }
+
+  function getExport(name) {
+    if (!REQUIRED_PUBLIC_EXPORTS.has(name)) throw new MissingPublicExportError(name);
+    const candidates = exportCandidates.get(name);
+    if (!candidates || candidates.size !== 1) throw new MissingPublicExportError(name);
+    const [record] = candidates;
+    for (const id of record.ids) {
+      let module;
+      try { module = requireModule(id); } catch { continue; }
+      if (typeof module?.[name] === 'function') return module[name];
+    }
+    throw new MissingPublicExportError(name);
+  }
 
   function recordDependency(id) {
     const normalized = Number(id);
@@ -344,7 +413,24 @@ export async function createPublicChunkLoader({
     try {
       const moduleObject = { exports: namespaces.get(normalized) };
       activeModuleObject = moduleObject;
-      record.factory(runtime, moduleObject, moduleObject.exports);
+      const previousInvocation = Object.getOwnPropertyDescriptor(context, factoryInvocationKey);
+      Object.defineProperty(context, factoryInvocationKey, {
+        value: { factory: record.factory, runtime, moduleObject },
+        configurable: true,
+        enumerable: false,
+        writable: false,
+      });
+      try {
+        vm.runInContext(`(() => { const current = globalThis[${JSON.stringify(factoryInvocationKey)}]; current.factory(current.runtime, current.moduleObject, current.moduleObject.exports); })()`, context, {
+          timeout: MAX_FACTORY_EXECUTION_MS,
+          displayErrors: false,
+        });
+      } finally {
+        const currentInvocation = Object.getOwnPropertyDescriptor(context, factoryInvocationKey);
+        if (!currentInvocation?.configurable) throw new VendorAssetsError();
+        if (previousInvocation) Object.defineProperty(context, factoryInvocationKey, previousInvocation);
+        else delete context[factoryInvocationKey];
+      }
       if (moduleObject.exports !== namespaces.get(normalized)) {
         namespaces.set(normalized, moduleObject.exports);
         commonJsModules.add(normalized);
@@ -367,6 +453,7 @@ export async function createPublicChunkLoader({
   return Object.freeze({
     assets: Object.freeze(assetRecords.map(record => Object.freeze(record))),
     getModule(id) { return requireModule(Number(id)); },
+    getExport,
     getModuleAsset(id) { return modules.get(Number(id))?.asset ?? null; },
     getAvailableModuleIds() { return Object.freeze([...modules.keys()].sort((a, b) => a - b)); },
     getDependencyGraph() {

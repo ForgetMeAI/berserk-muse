@@ -268,6 +268,22 @@ test('public view includes pool-local quarantine and verified health check clear
   await fake.jobs.close();
 });
 
+test('a Muse VM outage remains visible through the login job without expiring an existing session', async () => {
+  const record = initialRecord(ID_A, 'first@example.com', { session: SESSION });
+  const fake = dependencies({ records: [record], login: async () => {
+    throw Object.assign(new Error('private upstream details'), { code: 'muse_vm_unavailable' });
+  } });
+  try {
+    const job = fake.service.relogin(ID_A);
+    const result = await waitJob(fake.jobs, job);
+    assert.equal(result.status, 'failed');
+    assert.equal(result.errorCode, 'muse_vm_unavailable');
+    assert.equal(fake.service.getJob(job.id).errorCode, 'muse_vm_unavailable');
+    assert.equal(fake.store.getPrivate(ID_A).status, 'active');
+    assert.equal(fake.store.getPrivate(ID_A).session.sessionRevision, 1);
+  } finally { await fake.service.close(); await fake.jobs.close(); }
+});
+
 test('stale relogin CAS failure does not demote a newer successful session', async () => {
   const record = initialRecord(ID_A, 'first@example.com', { session: SESSION });
   const fake = dependencies({ records: [record] });

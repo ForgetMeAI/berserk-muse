@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createBridge } from '../src/server.mjs';
+import { TransportFailure } from '../src/accounts/pool.mjs';
 
 const AUTH = 'Bearer muse-local';
 const jsonHeaders = { 'content-type': 'application/json', authorization: AUTH };
@@ -46,6 +47,18 @@ const addTool = {
     },
   },
 };
+
+test('explains a Muse VM outage without declaring the saved account signed out or echoing upstream data', async () => {
+  await withBridge(driver(() => { throw new TransportFailure({ code: 'muse_vm_unavailable', scope: 'service', delivery: 'not_sent' }); }), async ({ port }) => {
+    const response = await send(port, '/v1/chat/completions', { method: 'POST', headers: jsonHeaders,
+      body: { model: 'muse-web', messages: [{ role: 'user', content: 'hello' }] } });
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.equal(body.error.code, 'muse_vm_unavailable');
+    assert.match(body.error.message, /no generation was submitted/);
+    assert.match(body.error.message, /generation server/);
+  });
+});
 
 test('serves health/readiness and local model catalog/detail with unknown-model handling', async () => {
   await withBridge(driver(), async ({ port }) => {

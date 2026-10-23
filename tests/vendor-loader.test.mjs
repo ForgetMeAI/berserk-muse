@@ -40,6 +40,42 @@ test('executes only the declared hash-pinned chunk and preserves module exports'
   assert.equal(loader.getSandboxGlobals().require, 'undefined');
 });
 
+test('discovers required exports from bounded factory export tables independent of module numbers', async t => {
+  const source = '(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push([null,901,(e,t,r)=>{e.s(["NoiseChannel",0,function NoiseChannel(){}],901)},902,(e,t,r)=>{e.s(["openNoiseConnection",0,function openNoiseConnection(){}],902)},903,(e,t,r)=>{e.s(["resolveHttpRouteRequest",0,function resolveHttpRouteRequest(){}],903)},904,(e,t,r)=>{e.s(["isGatewayRequestError",0,function isGatewayRequestError(){}],904)}]);';
+  const f = await fixture(source);
+  t.after(f.dispose);
+  const loader = await createPublicChunkLoader({ assetsDirValidatedManifest: f.manifest, approvedDynamicChunks: f.manifest.dynamicChunks });
+  t.after(loader.close);
+  for (const name of ['NoiseChannel', 'openNoiseConnection', 'resolveHttpRouteRequest', 'isGatewayRequestError']) {
+    assert.equal(loader.getExport(name).name, name);
+  }
+});
+
+test('semantic export discovery fails closed for missing, ambiguous, and wrong-type exports', async t => {
+  const cases = [
+    ['missing', '(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push([null,901,(e,t,r)=>{e.s(["NoiseChannel",0,function NoiseChannel(){}])}]);', 'openNoiseConnection'],
+    ['ambiguous', '(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push([null,901,(e,t,r)=>{e.s(["NoiseChannel",0,function One(){}])},902,(e,t,r)=>{e.s(["NoiseChannel",0,function Two(){}])}]);', 'NoiseChannel'],
+    ['wrong-type', '(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push([null,901,(e,t,r)=>{e.s(["NoiseChannel",0,42])}]);', 'NoiseChannel'],
+  ];
+  for (const [label, source, name] of cases) {
+    const f = await fixture(source);
+    t.after(f.dispose);
+    const loader = await createPublicChunkLoader({ assetsDirValidatedManifest: f.manifest, approvedDynamicChunks: f.manifest.dynamicChunks });
+    t.after(loader.close);
+    assert.throws(() => loader.getExport(name), { code: 'public_export_missing' }, label);
+  }
+});
+
+test('bounds semantic module initialization and restores the temporary VM invocation binding', async t => {
+  const source = '(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push([null,901,(e,t,r)=>{e.s(["NoiseChannel",0,function NoiseChannel(){}]);while(true){}}]);';
+  const f = await fixture(source);
+  t.after(f.dispose);
+  const loader = await createPublicChunkLoader({ assetsDirValidatedManifest: f.manifest, approvedDynamicChunks: f.manifest.dynamicChunks });
+  t.after(loader.close);
+  assert.throws(() => loader.getExport('NoiseChannel'), { code: 'public_export_missing' });
+  assert.equal(loader.getAvailableModuleIds().includes(901), true);
+});
+
 test('requires canonical private cache and rejects directory symlinks', async t => {
   const f = await fixture();
   t.after(f.dispose);

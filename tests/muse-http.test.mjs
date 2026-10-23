@@ -137,6 +137,124 @@ test('successful generation uses Muse HTTP bootstrap and waits for channel/runti
   });
 });
 
+test('resolves current assigned VM inventory by preference, with first endpoint as fallback', async () => {
+  const cases = [
+    {
+      preferred: true,
+      vms: [
+        { id: 'first-vm', vm_id: 'first-id', endpoint_url: 'https://first.metaaivm.com/' },
+        { id: 'preferred-vm', vm_id: 'preferred-id', endpoint_url: VM.endpoint_url, is_preferred: true },
+      ],
+      expectedUrl: VM.endpoint_url,
+      expectedId: 'preferred-id',
+      expectedName: 'preferred-vm',
+    },
+    {
+      preferred: false,
+      vms: [
+        { id: 'first-vm', vm_id: 'first-id', endpoint_url: 'https://first.metaaivm.com/' },
+        { id: 'second-vm', vm_id: 'second-id', endpoint_url: VM.endpoint_url },
+      ],
+      expectedUrl: 'https://first.metaaivm.com/',
+      expectedId: 'first-id',
+      expectedName: 'first-vm',
+    },
+  ];
+  for (const item of cases) {
+    let opened;
+    const fake = setup({ responses: { '/api/session': () => makeResponse(200, { status: 'assigned', vms: item.vms }) },
+      onRuntimeOpen: (_runtime, url, options) => { opened = { url, options }; } });
+    const transport = await fake.protocol.transportFactory({ id: 'account-a' }, sessionFor('a'));
+    assert.deepEqual(await transport.generate('prompt'), { text: 'safe answer', delivery: 'accepted' });
+    assert.deepEqual(opened, { url: item.expectedUrl, options: { vmName: item.expectedName, signal: undefined } });
+    const wake = fake.calls.find(call => call.path === '/api/hatch/vm/wake');
+    assert.deepEqual(JSON.parse(wake.body), { vm_id: item.expectedId, retry_count: 0, connect_attempt_id: JSON.parse(wake.body).connect_attempt_id });
+    assert.equal(typeof JSON.parse(wake.body).connect_attempt_id, 'string');
+  }
+});
+
+test('VM absence and unknown inventory never wake or enter generation', async () => {
+  for (const status of ['none', 'unavailable', 'future_status']) {
+    let generations = 0;
+    const fake = setup({ responses: { '/api/session': () => makeResponse(200, { status }) },
+      rpcGenerate: async () => { generations += 1; return { text: 'unexpected' }; },
+      failureFactory: meta => new TransportFailure(meta) });
+    const transport = await fake.protocol.transportFactory({ id: 'account-a' }, sessionFor('a'));
+    await assert.rejects(transport.generate('prompt'), error => {
+      assert.equal(TransportFailure.is(error), true);
+      assert.equal(error.transportCode, 'muse_vm_unavailable');
+      assert.equal(error.scope, 'account');
+      assert.equal(error.delivery, 'not_sent');
+      assert.equal(error.recoverable, false);
+      return true;
+    });
+    assert.deepEqual(fake.calls.map(call => call.path), ['/api/session']);
+    assert.equal(generations, 0);
+  }
+});
+
+test('an account without a VM falls back to another account before any generation is submitted', async () => {
+  const ids = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'];
+  const records = new Map(ids.map((id, i) => [id, { id, revision: 1, enabled: true, status: 'active',
+    quarantinedAt: null, cooldownUntil: null, reasonCode: null, session: sessionFor(i ? 'b' : 'a') }]));
+  const pub = id => { const record = records.get(id); return { ...record, session: undefined, hasSession: true,
+    sessionRevision: record.session.sessionRevision, quarantined: false }; };
+  const store = {
+    listPublic: () => ids.map(pub), getPublic: pub, getPrivate: id => structuredClone(records.get(id)),
+    async updateAccount(id, revision, patch) {
+      const record = records.get(id); assert.equal(record.revision, revision);
+      Object.assign(record, patch); record.revision++; return pub(id);
+    },
+  };
+  let generations = 0;
+  const fake = setup({ responses: { '/api/session': ({ headers }) =>
+    makeResponse(200, headers.get('cookie') === 'muse_session=a' ? { status: 'unavailable' } : VM) },
+  rpcGenerate: async () => { generations++; return { text: 'one reply' }; },
+  failureFactory: meta => new TransportFailure(meta) });
+  const pool = new AccountPool({ store, transportFactory: fake.protocol.transportFactory });
+  const queue = new AccountQueue({ pool, maxAttempts: 2 });
+  try {
+    const result = await queue.run((signal, lease) => lease.transport.generate('hello', { signal, nonce: 'n' }),
+      undefined, { requestId: 'fallback-vm-test' });
+    assert.equal(result.text, 'one reply');
+    assert.equal(generations, 1);
+    assert.deepEqual(fake.calls.filter(call => call.path === '/api/session').map(call => call.cookie), ['muse_session=a', 'muse_session=b']);
+    assert.equal(records.get(ids[0]).status, 'active');
+    assert.equal(records.get(ids[0]).quarantinedAt, null);
+    assert.ok(records.get(ids[0]).cooldownUntil > Date.now());
+  } finally { await queue.close(); await pool.close(); }
+});
+
+test('probe accepts only known authenticated no-VM inventory states and leaves unknown status unvalidated', async () => {
+  for (const status of ['none', 'unavailable']) {
+    const fake = setup({ responses: { '/api/session': () => makeResponse(200, { status }) } });
+    assert.deepEqual(await fake.protocol.probe({ id: 'account-a' }, sessionFor('a')),
+      { valid: true, expiresAt: null });
+    assert.deepEqual(fake.store.replacements, []);
+  }
+  const unknown = setup({ responses: { '/api/session': () => makeResponse(200, { status: 'future_status' }) },
+    failureFactory: meta => new TransportFailure(meta) });
+  await assert.rejects(unknown.protocol.probe({ id: 'account-a' }, sessionFor('a')), error => {
+    assert.equal(error.transportCode, 'muse_vm_unavailable');
+    assert.equal(error.scope, 'account');
+    return true;
+  });
+  assert.deepEqual(unknown.store.replacements, []);
+});
+
+test('does not fall through from a malicious preferred inventory URL to another VM', async () => {
+  let generations = 0;
+  const fake = setup({ responses: { '/api/session': () => makeResponse(200, { status: 'assigned', vms: [
+    { id: 'evil', vm_id: 'evil-id', endpoint_url: 'https://attacker.example/', is_preferred: true },
+    { id: 'safe', vm_id: 'safe-id', endpoint_url: 'https://safe.metaaivm.com/' },
+  ] }) }, rpcGenerate: async () => { generations += 1; return { text: 'unexpected' }; },
+  failureFactory: meta => new TransportFailure(meta) });
+  const transport = await fake.protocol.transportFactory({ id: 'account-a' }, sessionFor('a'));
+  await assert.rejects(transport.generate('prompt'), error => error.transportCode === 'muse_vm_unavailable' && error.scope === 'account');
+  assert.deepEqual(fake.calls.map(call => call.path), ['/api/session']);
+  assert.equal(generations, 0);
+});
+
 test('cookie jars are isolated between account transports', async () => {
   const fake = setup();
   const transportA = await fake.protocol.transportFactory({ id: 'account-a' }, sessionFor('cookie-a'));
@@ -347,6 +465,23 @@ test('refresh performs bodyless uncached auth validation and stores only gateway
     assert.deepEqual(result.session.tokens.gateway, { token: 'gateway-token', notaryToken: 'gateway-notary' });
     assert.equal(Object.hasOwn(result.session.device.upstream, 'vmName'), false);
     assert.equal(JSON.stringify(result.session).includes('unused-app-token'), false);
+  }
+});
+
+test('refresh keeps a validated account active when Muse has no usable VM', async () => {
+  for (const inventory of [{ status: 'none' }, { status: 'unavailable' }, { status: 'future_status' }]) {
+    const fake = setup({ responses: {
+      '/api/auth/check': () => makeResponse(200, { outcome: 'validated' }),
+      '/api/session': () => makeResponse(200, inventory),
+    }, failureFactory: meta => new TransportFailure(meta) });
+    await assert.rejects(fake.protocol.refresh({ id: 'account-a' }, sessionFor('a')), error => {
+      assert.equal(error.transportCode, 'muse_vm_unavailable');
+      assert.equal(error.scope, 'account');
+      assert.equal(error.delivery, 'not_sent');
+      return true;
+    });
+    assert.deepEqual(fake.calls.map(call => call.path), ['/api/auth/check', '/api/session']);
+    assert.deepEqual(fake.store.replacements, []);
   }
 });
 

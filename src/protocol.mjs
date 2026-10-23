@@ -199,10 +199,12 @@ export function buildPrompt(request, { nonce } = {}) {
     'You are a decision planner for a local API adapter. Read the complete canonical context below.',
     'Never execute, simulate, or claim to execute a tool. Do not use Muse built-in tools, create goals or tasks, schedule actions, or interact with connected services. You may only select the next local tool call; the client executes all actions.',
     'Return exactly one JSON object with exactly these fields: request_id, content, tool_calls.',
+    'Put the complete JSON object inside one fenced code block labelled json. This preserves literal backslashes when the web interface renders the answer. Do not put any text outside that code block.',
     'Set request_id to the supplied request_id exactly. Set content to a plain text string for a user-facing reply, or null when selecting tools.',
     'Set tool_calls to an array. Each item has exactly name and arguments; arguments must be a JSON object matching that tool schema. Use [] when replying with content.',
+    'In JSON strings, encode every literal backslash as \\\\; use escapes such as \\n or \\t only when you intend their decoded control character, and use \\u only with four hexadecimal digits. Keep Windows paths, regular expressions, Markdown, and math notation valid JSON.',
     'Respect tool_choice. For none, return text and no calls. For required, select at least one tool. For a named choice, call only that function.',
-    'Do not add commentary, markdown, or fields outside the JSON envelope.',
+    'Do not add commentary or fields outside the JSON envelope. Use no Markdown except the single enclosing json code fence.',
     'CANONICAL_CONTEXT_JSON:',
     JSON.stringify(context),
   ].join('\n');
@@ -275,6 +277,95 @@ function rejectDuplicateJsonKeys(source) {
   if (index !== source.length) throw new SyntaxError();
 }
 
+function repairInvalidJsonEscapes(source) {
+  let repaired = '';
+  let inString = false;
+  let changed = false;
+  let braceDepth = 0;
+  let bracketDepth = 0;
+  let topLevelKey = null;
+  let currentStringIsKey = false;
+  let currentKey = null;
+  let canRepairCurrentString = false;
+
+  const findTopLevelKey = start => {
+    let end = start + 1;
+    while (end < source.length) {
+      if (source[end] === '\\') { end += 2; continue; }
+      if (source[end] === '"') break;
+      end += 1;
+    }
+    if (end >= source.length) return null;
+    let cursor = end + 1;
+    while (/\s/.test(source[cursor] ?? '')) cursor += 1;
+    if (source[cursor] !== ':') return null;
+    try { return JSON.parse(source.slice(start, end + 1)); } catch { return null; }
+  };
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (!inString) {
+      repaired += char;
+      if (char === '{') braceDepth += 1;
+      else if (char === '}') braceDepth -= 1;
+      else if (char === '[') bracketDepth += 1;
+      else if (char === ']') bracketDepth -= 1;
+      if (braceDepth === 1 && bracketDepth === 0) {
+        if (char === '"') {
+          const key = findTopLevelKey(index);
+          currentStringIsKey = key !== null;
+          currentKey = key;
+          canRepairCurrentString = !currentStringIsKey && topLevelKey === 'content';
+        }
+      } else if (char === '"') {
+        currentStringIsKey = false;
+        canRepairCurrentString = false;
+      }
+      if (char === '"') inString = true;
+      continue;
+    }
+    if (char === '"') {
+      repaired += char;
+      inString = false;
+      if (currentStringIsKey) {
+        topLevelKey = currentKey;
+        currentKey = null;
+      } else if (braceDepth === 1 && bracketDepth === 0) {
+        topLevelKey = null;
+      }
+      continue;
+    }
+    if (char !== '\\') {
+      repaired += char;
+      continue;
+    }
+    const next = source[index + 1];
+    if (next === undefined) return null;
+    if ('"\\/bfnrt'.includes(next)) {
+      repaired += char + next;
+      index += 1;
+      continue;
+    }
+    if (next === 'u') {
+      const digits = source.slice(index + 2, index + 6);
+      // A malformed unicode escape may be intentional malformed JSON; do not
+      // guess whether the slash was meant to be literal.
+      if (!/^[\da-fA-F]{4}$/.test(digits)) return null;
+      repaired += source.slice(index, index + 6);
+      index += 5;
+      continue;
+    }
+    if (!canRepairCurrentString) return null;
+    // Only escape a slash whose following character cannot be a JSON escape.
+    // In particular, valid escapes such as \n remain untouched because their
+    // literal-versus-control-character intent cannot be inferred safely.
+    repaired += '\\\\' + next;
+    index += 1;
+    changed = true;
+  }
+  return changed ? repaired : null;
+}
+
 function parseModelJson(text) {
   if (typeof text !== 'string') fail('Model response must be text.', null, 'invalid_model_response');
   let candidate = text.trim();
@@ -284,6 +375,13 @@ function parseModelJson(text) {
     rejectDuplicateJsonKeys(candidate);
     return JSON.parse(candidate);
   } catch {
+    const repaired = repairInvalidJsonEscapes(candidate);
+    if (repaired !== null) {
+      try {
+        rejectDuplicateJsonKeys(repaired);
+        return JSON.parse(repaired);
+      } catch { /* Keep the same generic protocol error below. */ }
+    }
     throw new ProtocolError('Model returned an invalid decision envelope.', 502, 'invalid_model_response');
   }
 }

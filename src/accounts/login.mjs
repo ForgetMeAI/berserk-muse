@@ -5,11 +5,13 @@ import { MAIL_HOSTS, MailClient, normalizeEmail, parseImportLine, validateMailUr
 import chromiumNetErrors from './chromium-net-errors.json' with { type: 'json' };
 import { waitForVerification } from '../mail/verification.mjs';
 import { resolveBrowserExecutable } from '../platform.mjs';
+import { resolveMuseSessionVm } from '../muse/vm.mjs';
 
 const MUSE_ORIGIN = 'https://muse.ai';
 const LOGIN_DIRECTORY = 'login-browser';
 const MAX_CAPTURED_HEADERS = 8192;
 const MAX_OTP_RESPONSE_BYTES = 1_048_576;
+const MAX_SESSION_RESPONSE_BYTES = 1_048_576;
 const SAFE_MESSAGES = Object.freeze({
   invalid_account: 'Account details are invalid.',
   unsafe_workspace: 'The dedicated login workspace is unsafe.',
@@ -29,6 +31,7 @@ const SAFE_MESSAGES = Object.freeze({
   account_mismatch: 'Muse sign-in was requested for a different email address.',
   aborted: 'Muse sign-in was cancelled.',
   muse_session_unavailable: 'Muse did not provide a valid authenticated session.',
+  muse_vm_unavailable: 'Muse has not made a VM available for this account yet.',
   token_exchange_failed: 'Muse did not accept the session token request.',
   invalid_token_response: 'Muse returned an invalid session token response.',
   browser_cleanup_failed: 'The dedicated Muse login window could not be closed safely.',
@@ -105,7 +108,7 @@ const SAFE_OTP_BODY_KINDS = new Set(['object', 'array', 'other', 'unavailable'])
 const SAFE_OTP_STATUS_FLAGS = new Set(['ok', 'success', 'error', 'failed', 'other', 'absent']);
 const SAFE_EMAIL_OUTCOMES = new Set([
   'submitted', 'button_missing', 'button_ambiguous', 'button_hidden', 'button_disabled',
-  'fill_failed', 'email_not_retained', 'click_failed', 'cancelled', 'page_changed',
+  'fill_failed', 'email_not_retained', 'click_failed', 'cancelled', 'page_changed', 'input_not_ready',
 ]);
 const SAFE_EMAIL_BUTTON_COUNTS = new Set(['none', 'one', 'many']);
 const SAFE_VERIFICATION_OUTCOMES = new Set([
@@ -115,7 +118,7 @@ const SAFE_VERIFICATION_OUTCOMES = new Set([
 const SAFE_VERIFICATION_FAILURES = new Set([...SAFE_VERIFICATION_OUTCOMES].filter(outcome => outcome !== 'ready'));
 const SAFE_OTP_SUBMIT_OUTCOMES = new Set([
   'submitted', 'submitted_enter', 'input_missing', 'input_ambiguous', 'input_hidden', 'input_disabled',
-  'input_value_changed', 'button_unavailable', 'interaction_required', 'failed', 'cancelled',
+  'input_value_changed', 'button_unavailable', 'interaction_required', 'auto_verifying', 'failed', 'cancelled',
 ]);
 
 function diagnosticReason(error, deadlineExpired = false) {
@@ -181,10 +184,10 @@ function safeDiagnostic(onDiagnostic, stage, reason, navigation = null) {
     return;
   }
   if (stage === 'session_response') {
-    const { httpStatus, bodyParsed, endpointPresent, vmIdPresent, vmNamePresent, accepted } = navigation || {};
+    const { httpStatus, bodyParsed, endpointPresent, vmIdPresent, vmNamePresent, accepted, vmUnavailable } = navigation || {};
     if (!Number.isInteger(httpStatus) || httpStatus < 100 || httpStatus > 599 ||
-        ![bodyParsed, endpointPresent, vmIdPresent, vmNamePresent, accepted].every(value => typeof value === 'boolean')) return;
-    try { onDiagnostic(Object.freeze({ stage, httpStatus, bodyParsed, endpointPresent, vmIdPresent, vmNamePresent, accepted })); }
+        ![bodyParsed, endpointPresent, vmIdPresent, vmNamePresent, accepted, vmUnavailable].every(value => typeof value === 'boolean')) return;
+    try { onDiagnostic(Object.freeze({ stage, httpStatus, bodyParsed, endpointPresent, vmIdPresent, vmNamePresent, accepted, vmUnavailable })); }
     catch { /* Diagnostics do not control login. */ }
     return;
   }
@@ -383,15 +386,6 @@ async function loadChromium(chromium) {
   return module.chromium || module.default?.chromium || module.default;
 }
 
-function normalizedGatewayUrl(value) {
-  if (typeof value !== 'string' || value.length > 4096) return null;
-  try {
-    const url = new URL(value);
-    if (!['https:', 'http:', 'wss:'].includes(url.protocol) || url.username || url.password || url.hash) return null;
-    return url.href;
-  } catch { return null; }
-}
-
 function pickHeaders(headers) {
   const selected = {};
   for (const [rawName, rawValue] of Object.entries(headers || {})) {
@@ -412,21 +406,8 @@ function pickHeaders(headers) {
   return selected;
 }
 
-function sessionFields(body) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
-  const gatewayUrl = normalizedGatewayUrl(body.endpoint_url);
-  let vmName;
-  if (body.vm_name !== undefined && body.vm_name !== null) {
-    if (typeof body.vm_name !== 'string') return null;
-    const normalizedVmName = body.vm_name.trim();
-    if (normalizedVmName) {
-      if (!validLabel(normalizedVmName, 255)) return null;
-      vmName = normalizedVmName;
-    }
-  }
-  const vmId = typeof body.vm_id === 'string' ? body.vm_id.trim() : '';
-  if (!gatewayUrl || !validLabel(vmId)) return null;
-  return { gatewayUrl, ...(vmName ? { vmName } : {}), vmId };
+function sessionFields(body, resolution = resolveMuseSessionVm(body, { allowLegacyDirect: true })) {
+  return resolution.kind === 'vm' ? resolution.descriptor : null;
 }
 
 function containsOfficialToken(data) {
@@ -465,41 +446,49 @@ async function boundedOperation(operation, timeoutMs, signal) {
   }
 }
 
+function capturedSessionPayload(httpStatus, body, bodyParsed, headers = {}) {
+  if (!Number.isInteger(httpStatus) || httpStatus < 100 || httpStatus > 599) return null;
+  if (httpStatus !== 200) return {
+    upstream: null, headers,
+    vmUnavailable: false,
+    diagnostic: { httpStatus, bodyParsed: false, endpointPresent: false, vmIdPresent: false, vmNamePresent: false, accepted: false, vmUnavailable: false },
+  };
+  const objectBody = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
+  const records = Array.isArray(objectBody?.vms) ? objectBody.vms.filter(item => item && typeof item === 'object') : [];
+  const resolution = bodyParsed ? resolveMuseSessionVm(body, { allowLegacyDirect: true }) : { kind: 'unknown' };
+  const upstream = bodyParsed ? sessionFields(body, resolution) : null;
+  return {
+    upstream,
+    headers,
+    vmUnavailable: resolution.kind === 'unavailable',
+    diagnostic: {
+      httpStatus, bodyParsed,
+      endpointPresent: Boolean(objectBody && (Object.hasOwn(objectBody, 'endpoint_url') || records.some(item => Object.hasOwn(item, 'endpoint_url')))),
+      vmIdPresent: Boolean(objectBody && (Object.hasOwn(objectBody, 'vm_id') || records.some(item => Object.hasOwn(item, 'vm_id')))),
+      vmNamePresent: Boolean(objectBody && (Object.hasOwn(objectBody, 'vm_name') || records.some(item =>
+        ['vm_name', 'name', 'vmName'].some(key => Object.hasOwn(item, key))))),
+      accepted: Boolean(upstream),
+      vmUnavailable: resolution.kind === 'unavailable',
+    },
+  };
+}
+
 async function captureSession(response, { timeoutMs, signal } = {}) {
   let httpStatus;
   try { httpStatus = response.status(); } catch { return null; }
   if (!Number.isInteger(httpStatus) || httpStatus < 100 || httpStatus > 599) return null;
-  if (httpStatus !== 200) return {
-    upstream: null,
-    diagnostic: { httpStatus, bodyParsed: false, endpointPresent: false, vmIdPresent: false, vmNamePresent: false, accepted: false },
-  };
-  const captureDeadline = Date.now() + Math.max(1, timeoutMs || 1);
-  const jsonResult = await boundedOperation(() => response.json(), timeoutMs, signal);
-  if (jsonResult.kind === 'aborted') return null;
-  const bodyParsed = jsonResult.kind === 'value';
-  const body = bodyParsed ? jsonResult.value : null;
-  const objectBody = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
-  const upstream = bodyParsed ? sessionFields(body) : null;
   let headers = {};
-  if (upstream) {
-    const remainingMs = Math.max(1, captureDeadline - Date.now());
+  if (httpStatus === 200) {
     const headerResult = await boundedOperation(
-      () => response.request().allHeaders(), Math.min(1_000, remainingMs), signal,
+      () => response.request().allHeaders(), Math.min(1_000, Math.max(1, timeoutMs)), signal,
     );
     if (headerResult.kind === 'aborted') return null;
     if (headerResult.kind === 'value') headers = pickHeaders(headerResult.value);
   }
-  return {
-    upstream,
-    headers,
-    diagnostic: {
-      httpStatus, bodyParsed,
-      endpointPresent: Boolean(objectBody && Object.hasOwn(objectBody, 'endpoint_url')),
-      vmIdPresent: Boolean(objectBody && Object.hasOwn(objectBody, 'vm_id')),
-      vmNamePresent: Boolean(objectBody && Object.hasOwn(objectBody, 'vm_name')),
-      accepted: Boolean(upstream),
-    },
-  };
+  if (httpStatus !== 200) return capturedSessionPayload(httpStatus, null, false, headers);
+  const jsonResult = await boundedOperation(() => response.json(), timeoutMs, signal);
+  if (jsonResult.kind === 'aborted') return null;
+  return capturedSessionPayload(httpStatus, jsonResult.value, jsonResult.kind === 'value', headers);
 }
 
 function sendOtpRequest(request) {
@@ -607,7 +596,50 @@ async function discoverOtpInput(page) {
   return { locator: null, count: 0 };
 }
 
-async function tryFillEmail(page, email, input, canAutoFill) {
+async function waitForEmailInputReady(input, { deadline, clock, sleep, signal, canAutoFill }) {
+  const readinessDeadline = Math.min(deadline, clock() + 3_000);
+  while (clock() < readinessDeadline) {
+    if (signal?.aborted || !canAutoFill()) return false;
+    try {
+      if (!input || await input.count() !== 1) return false;
+      if (typeof input.isVisible === 'function' && !await input.isVisible()) {
+        await sleep(Math.min(50, readinessDeadline - clock()), signal);
+        continue;
+      }
+      if (typeof input.isEditable === 'function' && !await input.isEditable()) {
+        await sleep(Math.min(50, readinessDeadline - clock()), signal);
+        continue;
+      }
+      // React exposes its installed input handlers on the DOM node after hydration.
+      // Inspect only their presence; never read the element value or handler data here.
+      if (typeof input.evaluate === 'function') {
+        const result = await boundedOperation(() => input.evaluate(element => {
+          for (let node = element, depth = 0; node && depth < 12; node = node.parentElement, depth++) {
+            for (const key of Object.keys(node)) {
+              if (!/^__react(?:Props|EventHandlers)\$/.test(key)) continue;
+              const props = node[key];
+              if (props && typeof props === 'object' &&
+                  ['onChange', 'onInput'].some(name => typeof props[name] === 'function')) return true;
+            }
+          }
+          return false;
+        }), Math.min(250, readinessDeadline - clock()), signal);
+        if (result.kind === 'aborted') return false;
+        if (result.kind !== 'value' || result.value !== true) {
+          await sleep(Math.min(50, readinessDeadline - clock()), signal);
+          continue;
+        }
+      }
+      return true;
+    } catch {
+      if (signal?.aborted || !canAutoFill()) return false;
+      await sleep(Math.min(50, readinessDeadline - clock()), signal).catch(() => {});
+    }
+  }
+  return false;
+}
+
+async function tryFillEmail(page, email, input, canAutoFill, { deadline, clock, sleep, signal }) {
   let current = { outcome: 'fill_failed', buttonCount: 'none', buttonVisible: null, buttonEnabled: null };
   let fillAttempted = false;
   const setOutcome = (name, buttonCount = 'none', buttonVisible = null, buttonEnabled = null) => {
@@ -620,7 +652,9 @@ async function tryFillEmail(page, email, input, canAutoFill) {
   try {
     if (!onMuse()) setOutcome('page_changed');
     else if (!canAutoFill()) setOutcome('cancelled');
-    else if (!input || (await input.count()) !== 1) setOutcome('fill_failed');
+    else if (!await waitForEmailInputReady(input, { deadline, clock, sleep, signal, canAutoFill })) {
+      setOutcome(signal?.aborted || !canAutoFill() ? 'cancelled' : 'input_not_ready');
+    }
     else {
       fillAttempted = true;
       let fillSucceeded = false;
@@ -658,8 +692,13 @@ async function tryFillEmail(page, email, input, canAutoFill) {
                   let enabled = null;
                   try {
                     if (typeof buttons.isEnabled === 'function') {
-                      const value = await buttons.isEnabled();
-                      enabled = typeof value === 'boolean' ? value : null;
+                      const enabledDeadline = Math.min(deadline, clock() + 1_500);
+                      do {
+                        const value = await buttons.isEnabled();
+                        enabled = typeof value === 'boolean' ? value : null;
+                        if (enabled !== false || !canAutoFill() || !onMuse()) break;
+                        await sleep(Math.min(50, enabledDeadline - clock()), signal);
+                      } while (clock() < enabledDeadline);
                     }
                   } catch { enabled = null; }
                   if (!canAutoFill()) setOutcome('cancelled', 'one', true, enabled);
@@ -674,6 +713,7 @@ async function tryFillEmail(page, email, input, canAutoFill) {
                       if (!canAutoFill()) setOutcome('cancelled', 'one', true, enabled);
                       else if (!onMuse()) setOutcome('page_changed', 'one', true, enabled);
                       else if (!emailRetained) setOutcome('email_not_retained', 'one', true, enabled);
+                      else if (enabled === false) setOutcome('button_disabled', 'one', true, false);
                       else {
                         await buttons.click({ timeout: 5_000 });
                         setOutcome('submitted', 'one', true, true);
@@ -811,6 +851,8 @@ export class BrowserSessionBootstrapper {
     let lastSessionProbeAt = null;
     const captureTasks = [];
     let capturedSession = null;
+    let capturedSessionHeaders = {};
+    let vmUnavailableObserved = false;
     let accountMismatch = false;
     let manualMode = false;
     let manualActivated = false;
@@ -819,6 +861,7 @@ export class BrowserSessionBootstrapper {
     const otpDiagnosticResponses = new WeakSet();
     const sessionDiagnosticShapes = new Set();
     let sessionFailureDiagnosticCount = 0;
+    let vmUnavailableDiagnosticReported = false;
     let verificationDiagnosticReported = false;
     const otpSubmitDiagnosticOutcomes = new Set();
 
@@ -849,9 +892,11 @@ export class BrowserSessionBootstrapper {
       if (!metadata || contextFinalized || signal?.aborted) return;
       const shape = JSON.stringify(metadata);
       if (sessionDiagnosticShapes.has(shape) || sessionDiagnosticShapes.size >= 3) return;
-      if (!metadata.accepted && sessionFailureDiagnosticCount >= 2) return;
+      const reportUnavailableOnce = metadata.vmUnavailable && !vmUnavailableDiagnosticReported;
+      if (!metadata.accepted && sessionFailureDiagnosticCount >= 2 && !reportUnavailableOnce) return;
       sessionDiagnosticShapes.add(shape);
       if (!metadata.accepted) sessionFailureDiagnosticCount++;
+      if (reportUnavailableOnce) vmUnavailableDiagnosticReported = true;
       safeDiagnostic(this.onDiagnostic, 'session_response', null, metadata);
     };
 
@@ -975,6 +1020,8 @@ export class BrowserSessionBootstrapper {
         const task = captureSession(response, { timeoutMs: captureTimeoutMs, signal }).then(value => {
           if (!value || contextFinalized || signal?.aborted) return;
           reportSessionResponse(value.diagnostic);
+          if (value.diagnostic.httpStatus === 200) capturedSessionHeaders = value.headers;
+          if (value.vmUnavailable) vmUnavailableObserved = true;
           if (value.upstream) capturedSession = { upstream: value.upstream, headers: value.headers };
         })
           .catch(() => {});
@@ -995,7 +1042,7 @@ export class BrowserSessionBootstrapper {
       safeProgress(setProgress, 5);
       const remainingBeforeNavigation = deadline - this.clock();
       if (remainingBeforeNavigation <= 0) fail('login_timeout');
-      try { await page.goto(MUSE_ORIGIN, { waitUntil: 'load', timeout: Math.min(45_000, remainingBeforeNavigation) }); }
+      try { await page.goto(MUSE_ORIGIN, { waitUntil: 'domcontentloaded', timeout: Math.min(45_000, remainingBeforeNavigation) }); }
       catch (error) {
         if (signal?.aborted) fail('aborted');
         safeDiagnostic(this.onDiagnostic, 'navigation', diagnosticReason(error, this.clock() >= deadline), {
@@ -1013,7 +1060,17 @@ export class BrowserSessionBootstrapper {
       let emailAttempted = false;
       let interactionRequired = false;
       while (this.clock() < deadline || (!manualMode && this.clock() >= autoDeadline)) {
-        if (!manualMode && this.clock() >= autoDeadline) await enterManualMode();
+        if (!manualMode && this.clock() >= autoDeadline) {
+          if (vmUnavailableObserved) {
+            let manualStepRequiresUser = false;
+            if (page && !contextFinalized) {
+              const manual = await inspectManualStep(page);
+              manualStepRequiresUser = manual.captcha || manual.terms || manual.accept || manual.password;
+            }
+            if (!manualStepRequiresUser) fail('muse_vm_unavailable');
+          }
+          await enterManualMode();
+        }
         abortIfNeeded(signal);
         if (accountMismatch) fail('account_mismatch');
         if (captureTasks.length) {
@@ -1080,15 +1137,47 @@ export class BrowserSessionBootstrapper {
               (lastSessionProbeAt === null || probeAt - lastSessionProbeAt >= 10_000)) {
             lastSessionProbeAt = probeAt;
             const probeTimeoutMs = Math.min(10_000, Math.max(1, deadline - probeAt));
+            let probeResult = null;
             try {
-              await evaluateWithTimeout(page, async ({ timeoutMs }) => {
+              probeResult = await evaluateWithTimeout(page, async ({ timeoutMs, maxResponseBytes }) => {
                 const probeSignal = AbortSignal.timeout(timeoutMs);
                 const response = await fetch('/api/session', {
                   method: 'GET', credentials: 'include', headers: { accept: 'application/json' }, signal: probeSignal,
+                  redirect: 'error',
                 });
-                await response.arrayBuffer();
-                return { status: response.status };
-              }, { timeoutMs: probeTimeoutMs, probeSession: true }, probeTimeoutMs, signal);
+                const responseUrl = response.url;
+                if (responseUrl !== 'https://muse.ai/api/session') {
+                  return { status: response.status, responseUrl, bodyParsed: false };
+                }
+                if (response.status !== 200) return { status: response.status, responseUrl, bodyParsed: false };
+                const reader = response.body?.getReader();
+                if (!reader) return { status: response.status, responseUrl, bodyParsed: false };
+                const chunks = [];
+                let totalBytes = 0;
+                try {
+                  while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    totalBytes += value.byteLength;
+                    if (totalBytes > maxResponseBytes) {
+                      await reader.cancel();
+                      return { status: response.status, responseUrl, bodyParsed: false, oversized: true };
+                    }
+                    chunks.push(value);
+                  }
+                  const bytes = new Uint8Array(totalBytes);
+                  let offset = 0;
+                  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+                  try {
+                    return { status: response.status, responseUrl, bodyParsed: true, body: JSON.parse(new TextDecoder().decode(bytes)) };
+                  } catch {
+                    return { status: response.status, responseUrl, bodyParsed: false };
+                  }
+                } catch {
+                  try { await reader.cancel(); } catch { /* The page request may already be aborted. */ }
+                  return { status: response.status, responseUrl, bodyParsed: false };
+                }
+              }, { timeoutMs: probeTimeoutMs, maxResponseBytes: MAX_SESSION_RESPONSE_BYTES, probeSession: true }, probeTimeoutMs, signal);
             } catch {
               abortIfNeeded(signal);
               // A failed or unauthorized discovery probe leaves the existing sign-in flow alone.
@@ -1096,13 +1185,23 @@ export class BrowserSessionBootstrapper {
             abortIfNeeded(signal);
             if (captureTasks.length) await Promise.allSettled(captureTasks.splice(0));
             abortIfNeeded(signal);
+            if (probeResult?.status === 200 && probeResult.responseUrl === `${MUSE_ORIGIN}/api/session` &&
+                probeResult.bodyParsed === true && !probeResult.oversized && !capturedSession) {
+              const value = capturedSessionPayload(200, probeResult.body, true, capturedSessionHeaders);
+              if (value) {
+                reportSessionResponse(value.diagnostic);
+                if (value.vmUnavailable) vmUnavailableObserved = true;
+                if (value.upstream) capturedSession = { upstream: value.upstream, headers: value.headers };
+              }
+            }
             if (capturedSession) continue;
           }
         }
 
         if (new URL(page.url()).origin === MUSE_ORIGIN) {
           const manual = await inspectManualStep(page);
-          if (manual.captcha || manual.terms || manual.accept || manual.otp || manual.password || manual.signIn) interactionRequired = true;
+          if (manual.captcha || manual.terms || manual.accept || manual.password || manual.signIn ||
+              (manual.otp && !otpSubmitted)) interactionRequired = true;
           if (manual.captcha || manual.terms || manual.accept || manual.password) {
             if (verificationState === 'ready' && !otpSubmitted) reportOtpSubmitOutcome('interaction_required');
             await enterManualMode();
@@ -1123,7 +1222,8 @@ export class BrowserSessionBootstrapper {
                 safePhase(setPhase, 'requesting_code');
                 emailAttempted = true;
                 const attempt = await tryFillEmail(page, validated.email, emailInput.locator,
-                  () => !manualMode && !verificationController.signal.aborted && !signal?.aborted);
+                  () => !manualMode && !verificationController.signal.aborted && !signal?.aborted,
+                  { deadline, clock: this.clock, sleep: this.sleep, signal });
                 if (!signal?.aborted && !contextFinalized) safeDiagnostic(this.onDiagnostic, 'email_submit', null, attempt);
                 if (attempt.outcome === 'submitted') {
                   interactionRequired = true;
@@ -1157,6 +1257,16 @@ export class BrowserSessionBootstrapper {
                     verificationCode = '';
                     verificationState = 'manual';
                     reportOtpSubmitOutcome('cancelled');
+                  } else if (typeof otpInputs.isVisible !== 'function' || !await otpInputs.isVisible()) {
+                    verificationCode = '';
+                    verificationState = 'manual';
+                    interactionRequired = true;
+                    reportOtpSubmitOutcome('input_hidden');
+                  } else if (typeof otpInputs.isEnabled !== 'function' || !await otpInputs.isEnabled()) {
+                    verificationCode = '';
+                    verificationState = 'manual';
+                    interactionRequired = true;
+                    reportOtpSubmitOutcome('input_disabled');
                   } else {
                     verificationCode = '';
                     if (typeof otpInputs.pressSequentially === 'function') {
@@ -1178,49 +1288,65 @@ export class BrowserSessionBootstrapper {
                       verificationState = 'manual';
                       reportOtpSubmitOutcome('cancelled');
                     } else if (verificationState !== 'manual') {
-                      const continueButtons = page.getByRole('button', { name: CONTINUE_LABEL });
-                      const buttonCount = await continueButtons.count();
-                      const buttonVisible = buttonCount === 1 && await continueButtons.isVisible();
-                      if (buttonVisible && !manualMode && !verificationController.signal.aborted && !signal?.aborted) {
-                        await continueButtons.click();
+                      const currentCount = await otpInputs.count();
+                      let autoVerificationPending = currentCount === 0;
+                      if (currentCount === 1) {
+                        try {
+                          autoVerificationPending = typeof otpInputs.isEnabled !== 'function' ||
+                            !await otpInputs.isEnabled();
+                        } catch { autoVerificationPending = true; }
+                      }
+                      if (autoVerificationPending && !manualMode && !verificationController.signal.aborted && !signal?.aborted) {
+                        // Muse may submit the code as soon as its controlled field accepts it.
+                        // The successful fill is the single submission; wait for session proof,
+                        // never press Enter or click a second control in this state.
                         otpSubmitted = true;
-                        reportOtpSubmitOutcome('submitted');
-                      } else if (!manualMode && !verificationController.signal.aborted && !signal?.aborted &&
-                          typeof otpInputs.press === 'function') {
-                        const currentCount = await otpInputs.count();
-                        let guardOutcome = null;
-                        let inputEnabled = false;
-                        if (currentCount === 0) guardOutcome = 'input_missing';
-                        else if (currentCount > 1) guardOutcome = 'input_ambiguous';
-                        else if (typeof otpInputs.isVisible !== 'function' || !await otpInputs.isVisible()) guardOutcome = 'input_hidden';
-                        else if (typeof otpInputs.isEnabled !== 'function') guardOutcome = 'input_disabled';
-                        else if (!await otpInputs.isEnabled()) guardOutcome = 'input_disabled';
-                        else {
-                          inputEnabled = true;
-                          if (typeof otpInputs.inputValue === 'function') {
-                            try {
-                              if (await otpInputs.inputValue({ timeout: 1_000 }) !== code) guardOutcome = 'input_value_changed';
-                            } catch { guardOutcome = 'input_value_changed'; }
-                          }
-                        }
-                        let onMuse = false;
-                        try { onMuse = new URL(page.url()).origin === MUSE_ORIGIN; } catch { /* Form changed. */ }
-                        if (!onMuse && !guardOutcome) guardOutcome = 'failed';
-                        if (inputEnabled && !guardOutcome && onMuse && !manualMode &&
-                            !verificationController.signal.aborted && !signal?.aborted) {
-                          await otpInputs.press('Enter', { timeout: 5_000 });
+                        reportOtpSubmitOutcome('auto_verifying');
+                      } else {
+                        const continueButtons = page.getByRole('button', { name: CONTINUE_LABEL });
+                        const buttonCount = await continueButtons.count();
+                        const buttonVisible = buttonCount === 1 && await continueButtons.isVisible();
+                        if (buttonVisible && !manualMode && !verificationController.signal.aborted && !signal?.aborted) {
+                          await continueButtons.click();
                           otpSubmitted = true;
-                          reportOtpSubmitOutcome('submitted_enter');
+                          reportOtpSubmitOutcome('submitted');
+                        } else if (!manualMode && !verificationController.signal.aborted && !signal?.aborted &&
+                            typeof otpInputs.press === 'function') {
+                          const currentCount = await otpInputs.count();
+                          let guardOutcome = null;
+                          let inputEnabled = false;
+                          if (currentCount === 0) guardOutcome = 'input_missing';
+                          else if (currentCount > 1) guardOutcome = 'input_ambiguous';
+                          else if (typeof otpInputs.isVisible !== 'function' || !await otpInputs.isVisible()) guardOutcome = 'input_hidden';
+                          else if (typeof otpInputs.isEnabled !== 'function') guardOutcome = 'input_disabled';
+                          else if (!await otpInputs.isEnabled()) guardOutcome = 'input_disabled';
+                          else {
+                            inputEnabled = true;
+                            if (typeof otpInputs.inputValue === 'function') {
+                              try {
+                                if (await otpInputs.inputValue({ timeout: 1_000 }) !== code) guardOutcome = 'input_value_changed';
+                              } catch { guardOutcome = 'input_value_changed'; }
+                            }
+                          }
+                          let onMuse = false;
+                          try { onMuse = new URL(page.url()).origin === MUSE_ORIGIN; } catch { /* Form changed. */ }
+                          if (!onMuse && !guardOutcome) guardOutcome = 'failed';
+                          if (inputEnabled && !guardOutcome && onMuse && !manualMode &&
+                              !verificationController.signal.aborted && !signal?.aborted) {
+                            await otpInputs.press('Enter', { timeout: 5_000 });
+                            otpSubmitted = true;
+                            reportOtpSubmitOutcome('submitted_enter');
+                          } else {
+                            interactionRequired = true;
+                            verificationState = 'manual';
+                            reportOtpSubmitOutcome(signal?.aborted || verificationController.signal.aborted || manualMode
+                              ? 'cancelled' : (guardOutcome ?? 'button_unavailable'));
+                          }
                         } else {
                           interactionRequired = true;
                           verificationState = 'manual';
-                          reportOtpSubmitOutcome(signal?.aborted || verificationController.signal.aborted || manualMode
-                            ? 'cancelled' : (guardOutcome ?? 'button_unavailable'));
+                          reportOtpSubmitOutcome('button_unavailable');
                         }
-                      } else {
-                        interactionRequired = true;
-                        verificationState = 'manual';
-                        reportOtpSubmitOutcome('button_unavailable');
                       }
                     }
                   }
@@ -1243,6 +1369,7 @@ export class BrowserSessionBootstrapper {
         await this.sleep(Math.min(this.pollMs, Math.max(1, deadline - this.clock())), signal);
       }
       if (!result && navigationFailureCode) fail(navigationFailureCode);
+      if (!result && vmUnavailableObserved && this.clock() >= deadline) fail('muse_vm_unavailable');
       if (!result && this.clock() >= deadline) fail('needs_user_interaction');
       if (!result) fail(verificationIssue || (interactionRequired ? 'needs_user_interaction' : 'login_timeout'));
       safeProgress(setProgress, 100);

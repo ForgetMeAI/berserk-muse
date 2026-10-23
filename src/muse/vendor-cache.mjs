@@ -108,6 +108,7 @@ async function assertRegularCacheFile(file, expectedHash, expectedBytes) {
 }
 
 async function readResponseBounded(response, maxBytes, signal) {
+  if (response.status === 404 || response.status === 410) throw fail('vendor_asset_stale');
   if (response.status !== 200 || response.redirected) throw fail('vendor_download_rejected');
   const declared = response.headers?.get?.('content-length');
   if (declared !== null && declared !== undefined && (!/^\d+$/.test(declared) || Number(declared) > maxBytes)) throw fail('vendor_asset_too_large');

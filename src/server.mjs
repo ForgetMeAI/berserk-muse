@@ -13,6 +13,10 @@ const LOCAL_AUTH = 'Bearer muse-local'; // Public local-only placeholder, not a 
 const DELIVERY_STATES = new Set(['not_sent', 'rejected_before_acceptance', 'accepted', 'unknown']);
 const SAFE_ERROR_CODE = /^[a-zA-Z0-9_.-]{1,64}$/;
 const SAFE_TELEMETRY_ID = /^[a-zA-Z0-9_.:-]{1,120}$/;
+const TRANSPORT_MESSAGES = new Map([
+  ['needs_vendor_assets', 'The current Muse client assets could not be prepared. Update Berserk and retry; no generation was submitted.'],
+  ['muse_vm_unavailable', 'Muse has not provided an available generation server for this account. Check Muse in the browser and try again later; no generation was submitted.'],
+]);
 
 function deliveryState(error, fallback = 'unknown') {
   return DELIVERY_STATES.has(error?.delivery) ? error.delivery : fallback;
@@ -279,7 +283,9 @@ export function createBridge({ driver, rootId = 'test', maxChars = 250000, maxBy
         errorCode: code,
         delivery: deliveryState(error, telemetryRequest.delivery),
       };
-      const message = deadlineHit ? 'The queued or active request exceeded its deadline.' : typedDelivery ? 'The upstream transport failed. Check account readiness before retrying.' : safe ? error.message : 'Local bridge failed. Restart it and check account readiness.';
+      const message = deadlineHit ? 'The queued or active request exceeded its deadline.' : typedDelivery ?
+        (deliveryState(error) === 'not_sent' && TRANSPORT_MESSAGES.get(code)) || 'The upstream transport failed. Check account readiness before retrying.' :
+        safe ? error.message : 'Local bridge failed. Restart it and check account readiness.';
       if (!res.headersSent) writeJson(res, status, anthropicWire ? anthropicError(status, code, message) : { error: {
         message,
         type: status >= 500 || typedDelivery ? 'upstream_error' : safe ? (error.type || 'upstream_error') : 'server_error',

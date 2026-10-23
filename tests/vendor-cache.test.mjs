@@ -88,6 +88,15 @@ test('integrity mismatch fails closed and leaves no cached asset', async () => {
   });
 });
 
+test('classifies only 404 and 410 as a stale locked asset', async () => {
+  await withCache(async cacheDir => {
+    const manifest = makeManifest([['one.js', 'one']]);
+    await assert.rejects(prepareVendor({ cacheDir, manifest, fetchImpl: async () => response('', 404) }), { code: 'vendor_asset_stale' });
+    await assert.rejects(prepareVendor({ cacheDir, manifest, fetchImpl: async () => response('', 410) }), { code: 'vendor_asset_stale' });
+    await assert.rejects(prepareVendor({ cacheDir, manifest, fetchImpl: async () => response('', 403) }), { code: 'vendor_download_rejected' });
+  });
+});
+
 test('corrupt cache fails closed by default; explicit repair downloads verified bytes', async () => {
   await withCache(async cacheDir => {
     const manifest = makeManifest([['one.js', 'expected']]);
