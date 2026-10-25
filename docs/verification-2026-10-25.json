@@ -4,7 +4,6 @@
   "sourceCommit": "9375856f25d4210b1c1e9c17fa7a50e4602d586d",
   "platform": "macOS arm64",
   "runnerNode": "26.0.0",
-  "runtimeChangedForPublication": false,
   "operationalSourceFilesMatched": 112,
   "transport": "http",
   "clientModelAlias": "muse-web",
@@ -275,7 +274,7 @@
     "manifest": "verification-2026-10-23.json",
     "macOSNode22Passed": 556,
     "macOSNode26Passed": 556,
-    "rerunForDocumentationOnlyChange": false
+    "localRerunOnOct25": false
   },
   "limits": [
     "One synthetic coding task per successful client run and one eligible owned account.",
@@ -397,5 +396,82 @@
     "tests/verify-clients.test.mjs": "4d7868f4f5595aac4a8a7d61d71ec2eb2fec30b10d9e3bc57c79006a13bb5609",
     "tests/verify-hermes-live.test.mjs": "2288f41b3d6d43e4930eb61c5cd2816c68e2001870a813b96e82304347139cbc",
     "tests/websocket-process.test.mjs": "9be543043fb13b18efc92dd024d26603043cb87342ff8269e970910c4964fc0b"
-  }
+  },
+  "vendorAssets": {
+    "assets": 104,
+    "dynamicChunks": 10,
+    "totalBytes": 7172610,
+    "semanticExports": [
+      "openNoiseConnection",
+      "NoiseChannel",
+      "resolveHttpRouteRequest",
+      "isGatewayRequestError"
+    ],
+    "candidateSha256": "b2252865eaf42c73f9a411227d470a46297d5513ee28956007dc87722e9eef98",
+    "previousCheckedInLockSha256": "7ade2729d6b122ba3c4285be93ef458ee5075f3ed86388f38b69cb9d2dd5937d",
+    "sameAssetSetAsLiveRunCache": true,
+    "automaticResolverSelectedCacheBeforeRuns": true,
+    "activePublicCacheLockLastWrittenAt": "2026-10-25T11:25:15.407304+00:00",
+    "publicDownloadsAndIntegrityAndSemanticChecksPassed": true,
+    "independentPublicValidation": {
+      "schemaVersion": 1,
+      "kind": "public-vendor-candidate-verification",
+      "result": "PASS",
+      "candidateSha256": "b2252865eaf42c73f9a411227d470a46297d5513ee28956007dc87722e9eef98",
+      "schema": 1,
+      "origin": "https://muse.ai",
+      "assetCount": 104,
+      "totalBytes": 7172610,
+      "dynamicChunkCount": 10,
+      "publicMuseAssetUrlsOnly": true,
+      "assetMetadataSha256": "86b3596a098edc2548d02f62fc3fdcbda1fb7abdd389310667e8e073a0ad45d6",
+      "semanticExports": {
+        "openNoiseConnection": true,
+        "NoiseChannel": true,
+        "resolveHttpRouteRequest": true,
+        "isGatewayRequestError": true
+      },
+      "allAssetHashesAndByteLengthsVerified": true,
+      "redirectsAllowed": false,
+      "credentialsOrCookiesSent": false
+    },
+    "checkedInLockCliVerification": {
+      "node22.23.3": "PASS",
+      "node26.0.0": "PASS",
+      "assets": 104,
+      "semanticExports": 4
+    }
+  },
+  "ciBeforeLockRefresh": {
+    "runId": 40191565012,
+    "headCommit": "46cc19b97be8dce50d44ecccddf947d2b5bf9173",
+    "conclusion": "failure",
+    "failingJob": "public-vendor-contract",
+    "errorCode": "vendor_asset_stale",
+    "nodeTests": {
+      "macos22": {
+        "tests": 556,
+        "pass": 556,
+        "skip": 0
+      },
+      "macos26": {
+        "tests": 556,
+        "pass": 556,
+        "skip": 0
+      },
+      "ubuntu22": {
+        "tests": 556,
+        "pass": 555,
+        "skip": 1
+      },
+      "ubuntu26": {
+        "tests": 556,
+        "pass": 555,
+        "skip": 1
+      }
+    },
+    "followup": "Refresh checked-in public lock to the same generation selected automatically before live coding runs; retain all checks."
+  },
+  "runtimeCodeChangedForPublication": false,
+  "checkedInVendorLockChangedAfterCI": true
 }
